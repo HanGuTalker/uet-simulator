@@ -1,0 +1,33 @@
+name: UEC module
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build python3
+      - name: Configure, build, and test
+        run: bash scripts/uec/check.sh
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake ninja-build python3
+      - name: Configure sanitizer build
+        run: >-
+          python3 ./ns3 configure --build-profile=debug --enable-tests --enable-examples
+          --enable-sanitizers --enable-modules=uet --out=build-sanitize -- -G Ninja
+      - name: Build sanitizer test runner
+        run: python3 ./ns3 build
+      - name: Run UET with sanitizers
+        run: >-
+          ASAN_OPTIONS=detect_leaks=1:halt_on_error=1
+          ./build-sanitize/utils/ns3.47-test-runner-debug --test-name=uet --verbose

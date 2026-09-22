@@ -1,0 +1,36 @@
+build_lib(
+  LIBNAME uet
+  SOURCE_FILES
+    helper/uet-helper.cc
+    helper/uet-udp-transport.cc
+    model/uet-endpoint.cc
+    model/uet-crc-trailer.cc
+    model/uet-header.cc
+    model/uet-nscc.cc
+    model/uet-pds-header.cc
+    model/uet-pdc.cc
+    model/uet-ses-engine.cc
+    model/uet-ses-header.cc
+    model/uet-simulation-tag.cc
+  HEADER_FILES
+    helper/uet-helper.h
+    helper/uet-udp-transport.h
+    model/uet-endpoint.h
+    model/uet-crc-trailer.h
+    model/uet-header.h
+    model/uet-nscc.h
+    model/uet-pds-header.h
+    model/uet-pdc.h
+    model/uet-ses-engine.h
+    model/uet-ses-header.h
+    model/uet-simulation-tag.h
+    model/uet-types.h
+  LIBRARIES_TO_LINK
+    ${libcore}
+    ${libnetwork}
+    ${libinternet}
+    ${libpoint-to-point}
+    ${libcsma}
+  TEST_SOURCES
+    test/uet-test-suite.cc
+)

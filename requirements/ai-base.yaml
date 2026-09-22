@@ -1,0 +1,31 @@
+schema_version: 1
+profile: AI Base
+specification: UEC 1.0.3
+matrix_source_revision: "0.8"
+status_values: [planned, in_progress, implemented, verified, deferred]
+requirements:
+  - {id: SES-1, feature: NO_OP transaction, obligation: mandatory, status: verified, test: UetSesEngineTestCase}
+  - {id: SES-2, feature: SEND transaction, obligation: "mandatory; at least one payload MTU", status: verified, test: UetRudMixedLossStressTestCase}
+  - {id: SES-3, feature: DATAGRAM SEND transaction, obligation: mandatory, status: verified, test: UetUudDatagramTestCase}
+  - {id: SES-6, feature: WRITE transaction, obligation: mandatory, status: verified, test: UetSesEndToEndTestCase}
+  - {id: SES-7, feature: WRITE IMM transaction, obligation: mandatory, status: verified, test: UetSesEndToEndTestCase}
+  - {id: SES-9, feature: Non-fetching ATOMIC transaction, obligation: mandatory, status: verified, test: UetSesEngineTestCase}
+  - {id: SES-15, feature: Relative addressing, obligation: mandatory, status: verified, test: UetSesEngineTestCase}
+  - {id: SES-16, feature: Absolute addressing, obligation: mandatory, status: verified, test: UetSesEngineTestCase}
+  - {id: SES-19, feature: Authorization semantics, obligation: mandatory, status: verified, test: UetSesEngineTestCase}
+  - {id: SES-21, feature: Memory key, obligation: mandatory, status: verified, test: UetSesEngineTestCase}
+  - {id: SES-26, feature: Standard packet format, obligation: mandatory, status: verified, test: UetWireHeaderLayoutTestCase}
+  - {id: SES-29, feature: Deferrable Send as Send packet format, obligation: mandatory, status: verified, test: UetSesEngineTestCase}
+  - {id: SES-33, feature: Atomic Extension packet format, obligation: mandatory, status: verified, test: UetWireHeaderLayoutTestCase}
+  - {id: SES-35, feature: Response packet format, obligation: mandatory, status: verified, test: UetSesEndToEndTestCase}
+  - {id: SES-38, feature: Delivery Complete (GO) packet format, obligation: mandatory, status: verified, test: UetSesEngineTestCase}
+  - {id: PDS-1, feature: Reliable unordered delivery (RUD), obligation: mandatory, spec_refs: ["3.3.6", "3.5.7.1", "3.5.20"], status: verified, test: UetRudMixedLossStressTestCase}
+  - {id: PDS-2, feature: Reliable ordered delivery (ROD), obligation: mandatory, spec_refs: ["3.3.6", "3.5.7.2", "3.5.21"], status: verified, test: UetRodOrderingTestCase}
+  - {id: PDS-4, feature: Unreliable unordered delivery (UUD), obligation: mandatory, spec_refs: ["3.3.6", "3.5.7.4", "3.5.10.12"], status: verified, test: UetUudDatagramTestCase}
+  - {id: PDS-5, feature: Endpoint trimming support, obligation: mandatory, status: verified, test: UetTrimRecoveryTestCase}
+  - {id: CMS-1, feature: NSCC for best-effort networks, obligation: mandatory, spec_refs: ["3.5.10.6", "3.5.12.4.3", "3.6.9.2"], status: verified, test: UetNsccAlgorithmTestCase}
+exclusions:
+  - {id: PDS-3, feature: RUDI, reason: optional for AI Base}
+  - {id: CMS-2, feature: RCCC, reason: optional for AI Base}
+  - {id: Security, feature: Transport Security Sublayer, reason: optional for AI Base}
+  - {id: Switch-Trimming, feature: Switch trimming ability, reason: optional switch capability; endpoint response is mandatory and verified}
