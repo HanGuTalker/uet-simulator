@@ -44,7 +44,7 @@ Every adapter exposes the same trace names where the meaning can be normalized:
 | `PacketTrimmed` | trim event for protocols that support it |
 | `PathSelected` | selected path/entropy identifier |
 | `ReorderDepth` | receive reorder-depth change |
-| `MessageComplete` | workload message completion and latency |
+| `MessageComplete` | receiver-side workload delivery completion and latency |
 
 A protocol must not emit a common trace for a semantically different event merely to populate a
 chart. Protocol-specific metrics may be added alongside these traces with explicit definitions.
@@ -56,9 +56,9 @@ configuration, connection and message requests into the existing RUD data path a
 trace events to the common trace surface. The adapter reports packet spraying and per-path
 congestion control as unsupported because the frozen UEC sender still assigns `pathId=0`.
 
-The workload entry point now accepts `--transport=uec`. Names for veRoCE, MRC, Falcon, MetaRoCE and
-RoCEv2 are parsed now. Until the corresponding adapter is registered, selecting one fails explicitly
-and never falls back to UEC.
+The workload entry point accepts `--transport=uec`, `--transport=rocev2` and `--transport=veroce`.
+Names for MRC, Falcon and MetaRoCE are parsed now. Until the corresponding adapter is registered,
+selecting one fails explicitly and never falls back to another protocol.
 
 ## Adapter requirements
 
@@ -80,4 +80,10 @@ The implementation registry is recorded in `requirements/transport-catalog.json`
 The optimized common module, UEC adapter and migrated workload entry point compile successfully.
 A two-node, one-message UEC smoke run completed one of one messages and emitted a JSON summary with
 `protocol: uec`. A request for `transport=mrc` was recognized and rejected because no MRC adapter is
-registered yet. No performance or full regression matrix was run during this phase.
+registered yet. The RoCEv2 module is registered as the conventional RC/DCQCN baseline; its exact
+scope and limitations are documented in `docs/transport/rocev2-model.md`.
+
+The veRoCE module registers a P2-oriented data-plane adapter on UDP port 4794. It implements actual
+veRoCE extension-header serialization, out-of-order DDP accounting, Lazy SACK/selective recovery,
+UDP source-port packet spreading and path-wise FCC. Its supported and deferred protocol functions
+are documented in `docs/transport/veroce-model.md`.

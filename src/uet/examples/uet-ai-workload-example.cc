@@ -3,14 +3,16 @@
  * SPDX-License-Identifier: GPL-2.0-only
  */
 
+#include "ns3/ai-transport-module.h"
 #include "ns3/core-module.h"
 #include "ns3/csma-module.h"
-#include "ns3/ai-transport-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
+#include "ns3/roce-module.h"
 #include "ns3/traffic-control-module.h"
 #include "ns3/uet-module.h"
+#include "ns3/veroce-module.h"
 
 #include <algorithm>
 #include <cmath>
@@ -96,26 +98,22 @@ class AiWorkload
         {
             concurrentGroups = 1 + backgroundAllToAllGroups;
         }
-        m_nsccInitialWindowBytes = autoScaleInitialWindow
-                                       ? std::max<uint32_t>(4096,
-                                                            nsccInitialWindowBytes /
-                                                                concurrentGroups)
-                                       : nsccInitialWindowBytes;
+        m_nsccInitialWindowBytes =
+            autoScaleInitialWindow
+                ? std::max<uint32_t>(4096, nsccInitialWindowBytes / concurrentGroups)
+                : nsccInitialWindowBytes;
         m_backgroundPdcInitialWindowBytes =
-            autoScaleInitialWindow && pattern == "ring-allreduce" &&
-                    backgroundAllToAllGroups > 0
+            autoScaleInitialWindow && pattern == "ring-allreduce" && backgroundAllToAllGroups > 0
                 ? std::max<uint32_t>(4096, m_nsccInitialWindowBytes / (nodeCount - 1))
                 : m_nsccInitialWindowBytes;
         if (!enableWorkConservingScheduler && pattern == "ring-allreduce" &&
-            backgroundAllToAllGroups > 0 &&
-            ringJobWeight > 0 && backgroundJobWeight > 0)
+            backgroundAllToAllGroups > 0 && ringJobWeight > 0 && backgroundJobWeight > 0)
         {
-            const uint64_t totalWeight = ringJobWeight +
-                                         static_cast<uint64_t>(backgroundJobWeight) *
-                                             backgroundAllToAllGroups;
+            const uint64_t totalWeight =
+                ringJobWeight +
+                static_cast<uint64_t>(backgroundJobWeight) * backgroundAllToAllGroups;
             m_ringPdcLineRateBps = linkRateBps * ringJobWeight / totalWeight;
-            const uint64_t backgroundGroupRate =
-                linkRateBps * backgroundJobWeight / totalWeight;
+            const uint64_t backgroundGroupRate = linkRateBps * backgroundJobWeight / totalWeight;
             m_backgroundPdcLineRateBps =
                 std::max<uint64_t>(1, backgroundGroupRate / (nodeCount - 1));
         }
@@ -249,9 +247,7 @@ class AiWorkload
                 m_bottleneckQueueDiscs.push_back(queueDisc);
                 queueDisc->TraceConnectWithoutContext(
                     "BytesInQueue",
-                    MakeBoundCallback(&AiWorkload::QueueBytesChanged,
-                                      this,
-                                      routerEgressLabels[i]));
+                    MakeBoundCallback(&AiWorkload::QueueBytesChanged, this, routerEgressLabels[i]));
             }
         }
         for (const auto& device : routerEgressDevices)
@@ -268,6 +264,8 @@ class AiWorkload
         const auto protocol = ParseAiTransportProtocol(transportName);
         AiTransportFactory transportFactory;
         transportFactory.Register(AiTransportProtocol::UEC, UetTransportAdapter::GetTypeId());
+        transportFactory.Register(AiTransportProtocol::ROCEV2, RoceV2TransportAdapter::GetTypeId());
+        transportFactory.Register(AiTransportProtocol::VEROCE, VeRoceTransportAdapter::GetTypeId());
         if (protocol == AiTransportProtocol::UNKNOWN || !transportFactory.IsRegistered(protocol))
         {
             std::cerr << "Transport '" << transportName
@@ -287,9 +285,9 @@ class AiWorkload
             endpointConfig.maxRetransmissions = 16;
             endpointConfig.lineRateBps = linkRateBps;
             endpointConfig.initialWindowBytes = m_nsccInitialWindowBytes;
-            endpointConfig.maximumWindowBytes = static_cast<uint32_t>(std::min<uint64_t>(
-                std::numeric_limits<uint32_t>::max(),
-                std::max<uint64_t>(65536, (3 * bdpBytes) / 2)));
+            endpointConfig.maximumWindowBytes = static_cast<uint32_t>(
+                std::min<uint64_t>(std::numeric_limits<uint32_t>::max(),
+                                   std::max<uint64_t>(65536, (3 * bdpBytes) / 2)));
             endpointConfig.baseRtt = NanoSeconds(nsccBaseRttNs);
             endpointConfig.targetQueueDelay = NanoSeconds(nsccTargetQueueDelayNs);
             endpointConfig.workConservingScheduler = enableWorkConservingScheduler;
@@ -310,9 +308,8 @@ class AiWorkload
                                                        MakeCallback(&AiWorkload::Nack, this));
             m_endpoints[i]->TraceConnectWithoutContext("EcnReceived",
                                                        MakeCallback(&AiWorkload::Ecn, this));
-            m_endpoints[i]->TraceConnectWithoutContext(
-                "PacketTrimmed",
-                MakeCallback(&AiWorkload::Trimmed, this));
+            m_endpoints[i]->TraceConnectWithoutContext("PacketTrimmed",
+                                                       MakeCallback(&AiWorkload::Trimmed, this));
             m_endpoints[i]->TraceConnectWithoutContext(
                 "CongestionWindow",
                 MakeBoundCallback(&AiWorkload::CongestionWindowSink, this, i + 1));
@@ -363,12 +360,11 @@ class AiWorkload
             }
             for (uint32_t source = 0; source < nodeCount; ++source)
             {
-                const uint32_t pdcId =
-                    CreateConfiguredConnection(source,
-                                               m_ringTargetBySource[source],
-                                               0,
-                                               0,
-                                               m_ringPdcLineRateBps);
+                const uint32_t pdcId = CreateConfiguredConnection(source,
+                                                                  m_ringTargetBySource[source],
+                                                                  0,
+                                                                  0,
+                                                                  m_ringPdcLineRateBps);
                 if (pdcId == 0)
                 {
                     return false;
@@ -414,12 +410,9 @@ class AiWorkload
                         m_ringMessageIds[collective][step].push_back(id);
                         m_ringMessageLocation.emplace(id, std::make_pair(collective, step));
                         m_messageGroups[id] = collective + 1;
-                        m_records.emplace(id,
-                                          MessageRecord{id,
-                                                        source + 1,
-                                                        target + 1,
-                                                        m_ringChunkBytes,
-                                                        -1});
+                        m_records.emplace(
+                            id,
+                            MessageRecord{id, source + 1, target + 1, m_ringChunkBytes, -1});
                     }
                 }
             }
@@ -438,12 +431,12 @@ class AiWorkload
                         {
                             continue;
                         }
-                        const uint32_t pdcId = CreateConfiguredConnection(
-                            source,
-                            target + 1,
-                            group + 1,
-                            m_backgroundPdcInitialWindowBytes,
-                            m_backgroundPdcLineRateBps);
+                        const uint32_t pdcId =
+                            CreateConfiguredConnection(source,
+                                                       target + 1,
+                                                       group + 1,
+                                                       m_backgroundPdcInitialWindowBytes,
+                                                       m_backgroundPdcLineRateBps);
                         if (pdcId == 0)
                         {
                             return false;
@@ -455,8 +448,8 @@ class AiWorkload
                                                                        backgroundJobWeight);
                         }
                         const uint64_t id = messageId++;
-                        const Time scheduled = MicroSeconds(measurementStartUs) +
-                                               NanoSeconds(backgroundStartOffsetNs);
+                        const Time scheduled =
+                            MicroSeconds(measurementStartUs) + NanoSeconds(backgroundStartOffsetNs);
                         m_records.emplace(id,
                                           MessageRecord{id,
                                                         source + 1,
@@ -477,99 +470,98 @@ class AiWorkload
                 }
             }
         }
-        else for (uint32_t source = 0; source < nodeCount; ++source)
+        else
         {
-            for (uint32_t target = 0; target < nodeCount; ++target)
+            for (uint32_t source = 0; source < nodeCount; ++source)
             {
-                const bool selected = pattern == "all-to-all" ||
-                                      (pattern == "incast" && target == nodeCount - 1) ||
-                                      (pattern == "single" && source == 0 && target == nodeCount - 1);
-                if (source == target || !selected)
+                for (uint32_t target = 0; target < nodeCount; ++target)
                 {
-                    continue;
-                }
-                uint32_t reusedConnectionId = 0;
-                if (reusePdc)
-                {
-                    reusedConnectionId = CreateConfiguredConnection(source, target + 1, 0);
-                    if (reusedConnectionId == 0)
+                    const bool selected =
+                        pattern == "all-to-all" ||
+                        (pattern == "incast" && target == nodeCount - 1) ||
+                        (pattern == "single" && source == 0 && target == nodeCount - 1);
+                    if (source == target || !selected)
                     {
-                        return false;
+                        continue;
                     }
-                    if (warmupBytes > 0)
+                    uint32_t reusedConnectionId = 0;
+                    if (reusePdc)
                     {
-                        const uint64_t warmupId = messageId++;
-                        m_warmupIds.insert(warmupId);
-                        Simulator::Schedule(NanoSeconds(startGapNs * source),
-                                            &AiWorkload::SubmitWarmup,
-                                            this,
-                                            source,
-                                            target + 1,
-                                            reusedConnectionId,
-                                            warmupId,
-                                            warmupBytes);
+                        reusedConnectionId = CreateConfiguredConnection(source, target + 1, 0);
+                        if (reusedConnectionId == 0)
+                        {
+                            return false;
+                        }
+                        if (warmupBytes > 0)
+                        {
+                            const uint64_t warmupId = messageId++;
+                            m_warmupIds.insert(warmupId);
+                            Simulator::Schedule(NanoSeconds(startGapNs * source),
+                                                &AiWorkload::SubmitWarmup,
+                                                this,
+                                                source,
+                                                target + 1,
+                                                reusedConnectionId,
+                                                warmupId,
+                                                warmupBytes);
+                        }
+                        if (measurementStartUs > 0)
+                        {
+                            const uint64_t captureNs = measurementStartUs * 1000ULL - 1;
+                            Simulator::Schedule(NanoSeconds(captureNs),
+                                                &AiWorkload::CaptureCongestionWindow,
+                                                this,
+                                                source,
+                                                reusedConnectionId);
+                        }
                     }
-                    if (measurementStartUs > 0)
+                    uint64_t previousMessageId = 0;
+                    for (uint32_t occurrence = 0; occurrence < messages; ++occurrence)
                     {
-                        const uint64_t captureNs = measurementStartUs * 1000ULL - 1;
-                        Simulator::Schedule(NanoSeconds(captureNs),
-                                            &AiWorkload::CaptureCongestionWindow,
-                                            this,
-                                            source,
-                                            reusedConnectionId);
+                        const uint32_t pdcId =
+                            reusePdc ? reusedConnectionId
+                                     : CreateConfiguredConnection(source, target + 1, occurrence);
+                        if (pdcId == 0)
+                        {
+                            return false;
+                        }
+                        const uint64_t id = messageId++;
+                        const Time scheduled = NanoSeconds(
+                            measurementStartUs * 1000ULL +
+                            startGapNs * static_cast<uint64_t>(occurrence * nodeCount + source));
+                        m_records.emplace(
+                            id,
+                            MessageRecord{id,
+                                          source + 1,
+                                          target + 1,
+                                          payloadBytes,
+                                          reusePdc && startGapNs == 0 && occurrence > 0
+                                              ? -1
+                                              : scheduled.GetNanoSeconds()});
+                        m_messageGroups[id] = occurrence + 1;
+                        if (reusePdc && startGapNs == 0 && occurrence > 0)
+                        {
+                            // Keep a long-lived PDC continuously busy without placing more than
+                            // the signed 16-bit CLEAR_PSN window on the wire at once.
+                            m_chainedSubmissions.emplace(
+                                previousMessageId,
+                                PendingSubmission{source, target + 1, pdcId, id, payloadBytes});
+                        }
+                        else
+                        {
+                            // Preserve a dense burst while avoiding artificial CSMA half-duplex
+                            // collisions at exactly identical simulation timestamps.
+                            Simulator::Schedule(scheduled,
+                                                &AiWorkload::SubmitMessage,
+                                                this,
+                                                source,
+                                                target + 1,
+                                                pdcId,
+                                                id,
+                                                payloadBytes);
+                        }
+                        previousMessageId = id;
                     }
-                }
-                uint64_t previousMessageId = 0;
-                for (uint32_t occurrence = 0; occurrence < messages; ++occurrence)
-                {
-                    const uint32_t pdcId = reusePdc
-                                               ? reusedConnectionId
-                                               : CreateConfiguredConnection(source,
-                                                                            target + 1,
-                                                                            occurrence);
-                    if (pdcId == 0)
-                    {
-                        return false;
-                    }
-                    const uint64_t id = messageId++;
-                    const Time scheduled = NanoSeconds(
-                        measurementStartUs * 1000ULL +
-                        startGapNs * static_cast<uint64_t>(occurrence * nodeCount + source));
-                    m_records.emplace(id,
-                                      MessageRecord{id,
-                                                    source + 1,
-                                                    target + 1,
-                                                    payloadBytes,
-                                                    reusePdc && startGapNs == 0 && occurrence > 0
-                                                        ? -1
-                                                        : scheduled.GetNanoSeconds()});
-                    m_messageGroups[id] = occurrence + 1;
-                    if (reusePdc && startGapNs == 0 && occurrence > 0)
-                    {
-                        // Keep a long-lived PDC continuously busy without placing more than
-                        // the signed 16-bit CLEAR_PSN window on the wire at once.
-                        m_chainedSubmissions.emplace(
-                            previousMessageId,
-                            PendingSubmission{source,
-                                              target + 1,
-                                              pdcId,
-                                              id,
-                                              payloadBytes});
-                    }
-                    else
-                    {
-                        // Preserve a dense burst while avoiding artificial CSMA half-duplex
-                        // collisions at exactly identical simulation timestamps.
-                        Simulator::Schedule(scheduled,
-                                            &AiWorkload::SubmitMessage,
-                                            this,
-                                            source,
-                                            target + 1,
-                                            pdcId,
-                                            id,
-                                            payloadBytes);
-                    }
-                    previousMessageId = id;
                 }
             }
         }
@@ -935,8 +927,9 @@ class AiWorkload
         {
             return 0;
         }
-        const std::size_t index = static_cast<std::size_t>(
-            std::ceil(percentile * static_cast<double>(sorted.size()))) - 1;
+        const std::size_t index =
+            static_cast<std::size_t>(std::ceil(percentile * static_cast<double>(sorted.size()))) -
+            1;
         return sorted[std::min(index, sorted.size() - 1)];
     }
 
@@ -965,12 +958,10 @@ class AiWorkload
                 latencies.push_back(record.latencyNs);
             }
         }
-        summary.completionRate = summary.expected == 0
-                                     ? 0.0
-                                     : static_cast<double>(summary.completed) / summary.expected;
-        summary.makespanNs = summary.completed == 0
-                                 ? 0
-                                 : summary.lastCompletionNs - summary.firstSubmitNs;
+        summary.completionRate =
+            summary.expected == 0 ? 0.0 : static_cast<double>(summary.completed) / summary.expected;
+        summary.makespanNs =
+            summary.completed == 0 ? 0 : summary.lastCompletionNs - summary.firstSubmitNs;
         if (summary.makespanNs > 0)
         {
             summary.goodputBps = static_cast<double>(summary.completedBytes) * 8.0 * 1e9 /
@@ -979,9 +970,10 @@ class AiWorkload
         if (!latencies.empty())
         {
             std::sort(latencies.begin(), latencies.end());
-            summary.meanLatencyNs = static_cast<double>(
-                                        std::accumulate(latencies.begin(), latencies.end(), int64_t{0})) /
-                                    latencies.size();
+            summary.meanLatencyNs =
+                static_cast<double>(
+                    std::accumulate(latencies.begin(), latencies.end(), int64_t{0})) /
+                latencies.size();
             summary.p50LatencyNs = Percentile(latencies, 0.50);
             summary.p95LatencyNs = Percentile(latencies, 0.95);
             summary.p99LatencyNs = Percentile(latencies, 0.99);
@@ -1023,23 +1015,23 @@ class AiWorkload
         {
             for (const auto& [binStartNs, bytes] : bins)
             {
-                const double goodputBps = static_cast<double>(bytes) * 8.0 * 1e9 /
-                                          static_cast<double>(m_throughputBinNs);
+                const double goodputBps =
+                    static_cast<double>(bytes) * 8.0 * 1e9 / static_cast<double>(m_throughputBinNs);
                 throughput << binStartNs << ',' << source << ',' << bytes << ','
                            << std::setprecision(12) << goodputBps << '\n';
             }
         }
 
-        messages << "protocol,pattern,node_count,group_id,message_id,source,target,bytes,scheduled_ns,submitted,"
+        messages << "protocol,pattern,node_count,group_id,message_id,source,target,bytes,scheduled_"
+                    "ns,submitted,"
                     "submitted_ns,completed,completed_ns,latency_ns\n";
         for (const auto& [id, record] : m_records)
         {
             const auto group = m_messageGroups.find(id);
             const uint32_t groupId = group == m_messageGroups.end() ? 0 : group->second;
             messages << m_transportName << ',' << m_pattern << ',' << m_nodeCount << ',' << groupId
-                     << ',' << id << ','
-                     << record.source << ','
-                     << record.target << ',' << record.bytes << ',' << record.scheduledNs << ','
+                     << ',' << id << ',' << record.source << ',' << record.target << ','
+                     << record.bytes << ',' << record.scheduledNs << ','
                      << (record.submitted ? 1 : 0) << ',' << record.submittedNs << ','
                      << (record.completed ? 1 : 0) << ',' << record.completedNs << ','
                      << record.latencyNs << '\n';
@@ -1054,42 +1046,43 @@ class AiWorkload
                                         ? -1
                                         : collective.completedNs - collective.submittedNs;
             collectives << m_transportName << ',' << m_pattern << ',' << i + 1 << ','
-                        << m_payloadBytes << ','
-                        << m_ringChunkBytes << ',' << m_ringStepsPerCollective << ','
-                        << collective.submittedNs << ',' << collective.completedNs << ','
-                        << latency << '\n';
+                        << m_payloadBytes << ',' << m_ringChunkBytes << ','
+                        << m_ringStepsPerCollective << ',' << collective.submittedNs << ','
+                        << collective.completedNs << ',' << latency << '\n';
         }
 
         const std::string header =
-            "protocol,pattern,fabric,link_rate,link_rate_bps,link_delay_ns,queue_packets,node_count,"
+            "protocol,pattern,fabric,link_rate,link_rate_bps,link_delay_ns,queue_packets,node_"
+            "count,"
             "messages_per_pair,payload_bytes,reuse_pdc,warmup_bytes,warmups_attempted,"
-            "warmups_submitted,warmups_completed,measurement_start_us,start_gap_ns,background_start_offset_ns,"
+            "warmups_submitted,warmups_completed,measurement_start_us,start_gap_ns,background_"
+            "start_offset_ns,"
             "nscc_base_rtt_ns,nscc_target_queue_delay_ns,nscc_initial_window_bytes,"
-            "nscc_requested_initial_window_bytes,auto_scale_initial_window,measurement_start_cwnd_bytes,"
+            "nscc_requested_initial_window_bytes,auto_scale_initial_window,measurement_start_cwnd_"
+            "bytes,"
             "ecn_enabled,ecn_min_bytes,ecn_max_bytes,ecn_queue_limit_bytes,peak_queue_bytes,"
             "queue_marked_packets,queue_marked_bytes,queue_dropped_packets,queue_dropped_bytes,"
             "expected,submitted,completed,"
-            "completion_rate,completed_payload_bytes,first_submit_ns,last_completion_ns,makespan_ns,"
+            "completion_rate,completed_payload_bytes,first_submit_ns,last_completion_ns,makespan_"
+            "ns,"
             "goodput_bps,mean_latency_ns,p50_latency_ns,p95_latency_ns,p99_latency_ns,"
             "max_latency_ns,retransmissions,timeouts,nacks,ecn_marks,trimmed_packets,tx_datagrams,"
             "rx_datagrams,mtu_drops,crc_drops,device_queue_drops\n";
         summaries << header << m_transportName << ',' << m_pattern << ',' << m_fabricType << ','
-                  << m_linkRate << ','
-                  << m_linkRateBps << ',' << m_linkDelayNs << ',' << m_queuePackets << ','
-                  << m_nodeCount << ',' << m_messagesPerPair << ',' << m_payloadBytes << ','
-                  << (m_reusePdc ? 1 : 0) << ',' << m_warmupBytes << ',' << m_warmupsAttempted
-                  << ',' << m_warmupsSubmitted << ',' << m_warmupsCompleted << ','
-                  << m_measurementStartUs << ',' << m_startGapNs << ','
+                  << m_linkRate << ',' << m_linkRateBps << ',' << m_linkDelayNs << ','
+                  << m_queuePackets << ',' << m_nodeCount << ',' << m_messagesPerPair << ','
+                  << m_payloadBytes << ',' << (m_reusePdc ? 1 : 0) << ',' << m_warmupBytes << ','
+                  << m_warmupsAttempted << ',' << m_warmupsSubmitted << ',' << m_warmupsCompleted
+                  << ',' << m_measurementStartUs << ',' << m_startGapNs << ','
                   << m_backgroundStartOffsetNs << ',' << m_nsccBaseRttNs << ','
                   << m_nsccTargetQueueDelayNs << ',' << m_nsccInitialWindowBytes << ','
-                  << m_nsccRequestedInitialWindowBytes << ','
-                  << (m_autoScaleInitialWindow ? 1 : 0) << ',' << MeanMeasurementStartCwnd() << ','
-                  << (m_enableEcn ? 1 : 0) << ',' << m_ecnMinBytes << ',' << m_ecnMaxBytes << ','
-                  << m_ecnQueueLimitBytes << ',' << m_peakQueueBytes << ','
-                  << m_queueMarkedPackets << ',' << m_queueMarkedBytes << ','
-                  << m_queueDroppedPackets << ',' << m_queueDroppedBytes << ','
-                  << summary.expected << ',' << summary.submitted << ','
-                  << summary.completed << ',' << std::setprecision(10) << summary.completionRate << ','
+                  << m_nsccRequestedInitialWindowBytes << ',' << (m_autoScaleInitialWindow ? 1 : 0)
+                  << ',' << MeanMeasurementStartCwnd() << ',' << (m_enableEcn ? 1 : 0) << ','
+                  << m_ecnMinBytes << ',' << m_ecnMaxBytes << ',' << m_ecnQueueLimitBytes << ','
+                  << m_peakQueueBytes << ',' << m_queueMarkedPackets << ',' << m_queueMarkedBytes
+                  << ',' << m_queueDroppedPackets << ',' << m_queueDroppedBytes << ','
+                  << summary.expected << ',' << summary.submitted << ',' << summary.completed << ','
+                  << std::setprecision(10) << summary.completionRate << ','
                   << summary.completedBytes << ',' << summary.firstSubmitNs << ','
                   << summary.lastCompletionNs << ',' << summary.makespanNs << ','
                   << summary.goodputBps << ',' << summary.meanLatencyNs << ','
@@ -1112,18 +1105,16 @@ class AiWorkload
              << "  \"messages_per_pair\": " << m_messagesPerPair << ",\n"
              << "  \"payload_bytes\": " << m_payloadBytes << ",\n"
              << "  \"ring_allreduce\": {\"collectives\": " << m_ringCollectives.size()
-             << ", \"chunk_bytes\": " << m_ringChunkBytes << ", \"steps_per_collective\": "
-             << m_ringStepsPerCollective << ", \"interleaved\": "
-             << (m_ringInterleaved ? "true" : "false") << "},\n"
-             << "  \"background_all_to_all\": {\"groups\": "
-             << m_backgroundAllToAllGroups << ", \"payload_bytes\": "
-             << m_backgroundPayloadBytes << ", \"pdc_initial_window_bytes\": "
-             << m_backgroundPdcInitialWindowBytes << ", \"start_offset_ns\": "
-             << m_backgroundStartOffsetNs << "},\n"
+             << ", \"chunk_bytes\": " << m_ringChunkBytes
+             << ", \"steps_per_collective\": " << m_ringStepsPerCollective
+             << ", \"interleaved\": " << (m_ringInterleaved ? "true" : "false") << "},\n"
+             << "  \"background_all_to_all\": {\"groups\": " << m_backgroundAllToAllGroups
+             << ", \"payload_bytes\": " << m_backgroundPayloadBytes
+             << ", \"pdc_initial_window_bytes\": " << m_backgroundPdcInitialWindowBytes
+             << ", \"start_offset_ns\": " << m_backgroundStartOffsetNs << "},\n"
              << "  \"job_rate_scheduler\": {\"enabled\": "
              << ((m_ringPdcLineRateBps > 0 || m_workConservingScheduler) ? "true" : "false")
-             << ", \"work_conserving\": "
-             << (m_workConservingScheduler ? "true" : "false")
+             << ", \"work_conserving\": " << (m_workConservingScheduler ? "true" : "false")
              << ", \"ring_weight\": " << m_ringJobWeight
              << ", \"background_weight\": " << m_backgroundJobWeight
              << ", \"ring_pdc_rate_bps\": " << m_ringPdcLineRateBps
@@ -1136,41 +1127,40 @@ class AiWorkload
              << ", \"warmups_completed\": " << m_warmupsCompleted
              << ", \"measurement_start_us\": " << m_measurementStartUs
              << ", \"start_gap_ns\": " << m_startGapNs
-             << ", \"measurement_start_cwnd_bytes\": " << MeanMeasurementStartCwnd()
-             << "},\n"
+             << ", \"measurement_start_cwnd_bytes\": " << MeanMeasurementStartCwnd() << "},\n"
              << "  \"nscc\": {\"base_rtt_ns\": " << m_nsccBaseRttNs
              << ", \"target_queue_delay_ns\": " << m_nsccTargetQueueDelayNs
              << ", \"initial_window_bytes\": " << m_nsccInitialWindowBytes
-             << ", \"requested_initial_window_bytes\": "
-             << m_nsccRequestedInitialWindowBytes << ", \"auto_scaled_initial_window\": "
+             << ", \"requested_initial_window_bytes\": " << m_nsccRequestedInitialWindowBytes
+             << ", \"auto_scaled_initial_window\": "
              << (m_autoScaleInitialWindow ? "true" : "false") << "},\n"
              << "  \"ecn_queue\": {\"enabled\": " << (m_enableEcn ? "true" : "false")
-             << ", \"min_bytes\": " << m_ecnMinBytes << ", \"max_bytes\": "
-             << m_ecnMaxBytes << ", \"limit_bytes\": " << m_ecnQueueLimitBytes
-             << ", \"peak_bytes\": " << m_peakQueueBytes << ", \"marked_packets\": "
-             << m_queueMarkedPackets << ", \"marked_bytes\": " << m_queueMarkedBytes
+             << ", \"min_bytes\": " << m_ecnMinBytes << ", \"max_bytes\": " << m_ecnMaxBytes
+             << ", \"limit_bytes\": " << m_ecnQueueLimitBytes
+             << ", \"peak_bytes\": " << m_peakQueueBytes
+             << ", \"marked_packets\": " << m_queueMarkedPackets
+             << ", \"marked_bytes\": " << m_queueMarkedBytes
              << ", \"dropped_packets\": " << m_queueDroppedPackets
              << ", \"dropped_bytes\": " << m_queueDroppedBytes << "},\n"
              << "  \"messages\": {\"expected\": " << summary.expected
-             << ", \"submitted\": " << summary.submitted << ", \"completed\": "
-             << summary.completed << ", \"completion_rate\": " << summary.completionRate
-             << "},\n"
+             << ", \"submitted\": " << summary.submitted << ", \"completed\": " << summary.completed
+             << ", \"completion_rate\": " << summary.completionRate << "},\n"
              << "  \"timing_ns\": {\"first_submit\": " << summary.firstSubmitNs
              << ", \"last_completion\": " << summary.lastCompletionNs
              << ", \"makespan\": " << summary.makespanNs << "},\n"
              << "  \"latency_ns\": {\"mean\": " << summary.meanLatencyNs
-             << ", \"p50\": " << summary.p50LatencyNs << ", \"p95\": "
-             << summary.p95LatencyNs << ", \"p99\": " << summary.p99LatencyNs
-             << ", \"max\": " << summary.maxLatencyNs << "},\n"
+             << ", \"p50\": " << summary.p50LatencyNs << ", \"p95\": " << summary.p95LatencyNs
+             << ", \"p99\": " << summary.p99LatencyNs << ", \"max\": " << summary.maxLatencyNs
+             << "},\n"
              << "  \"completed_payload_bytes\": " << summary.completedBytes << ",\n"
              << "  \"goodput_bps\": " << summary.goodputBps << ",\n"
              << "  \"protocol_events\": {\"retransmissions\": " << m_retransmissions
              << ", \"timeouts\": " << m_timeouts << ", \"nacks\": " << m_nacks
-             << ", \"ecn_marks\": " << m_ecnMarks << ", \"trimmed_packets\": "
-             << m_trimmedPackets << "},\n"
+             << ", \"ecn_marks\": " << m_ecnMarks << ", \"trimmed_packets\": " << m_trimmedPackets
+             << "},\n"
              << "  \"transport\": {\"tx_datagrams\": " << m_txDatagrams
-             << ", \"rx_datagrams\": " << m_rxDatagrams << ", \"mtu_drops\": "
-             << m_mtuDrops << ", \"crc_drops\": " << m_crcDrops << "},\n"
+             << ", \"rx_datagrams\": " << m_rxDatagrams << ", \"mtu_drops\": " << m_mtuDrops
+             << ", \"crc_drops\": " << m_crcDrops << "},\n"
              << "  \"device_queue_drops\": " << m_deviceQueueDrops << "\n"
              << "}\n";
         return true;
@@ -1189,12 +1179,13 @@ class AiWorkload
                   << " nacks=" << m_nacks << std::endl;
         if (m_reusePdc)
         {
-            std::cout << "steady-state: warmups=" << m_warmupsCompleted << '/'
-                      << m_warmupsSubmitted << " measurement_start_cwnd="
-                      << MeanMeasurementStartCwnd() << " bytes" << std::endl;
+            std::cout << "steady-state: warmups=" << m_warmupsCompleted << '/' << m_warmupsSubmitted
+                      << " measurement_start_cwnd=" << MeanMeasurementStartCwnd() << " bytes"
+                      << std::endl;
         }
         std::cout << "outputs: " << outputPrefix << '-' << m_pattern
-                  << "-{messages.csv,collectives.csv,summary.csv,summary.json,cwnd.csv,queue.csv,throughput.csv}"
+                  << "-{messages.csv,collectives.csv,summary.csv,summary.json,cwnd.csv,queue.csv,"
+                     "throughput.csv}"
                   << std::endl;
     }
 
@@ -1318,10 +1309,10 @@ main(int argc, char* argv[])
     CommandLine command(__FILE__);
     command.AddValue("nodes", "Number of endpoints (at least two)", nodes);
     command.AddValue("messages", "Messages per pair, or collectives for ring-allreduce", messages);
-    command.AddValue("payloadBytes", "Bytes per message, or tensor bytes per AllReduce rank", payloadBytes);
-    command.AddValue("transport",
-                     "uec, veroce, mrc, falcon, metaroce, or rocev2",
-                     transport);
+    command.AddValue("payloadBytes",
+                     "Bytes per message, or tensor bytes per AllReduce rank",
+                     payloadBytes);
+    command.AddValue("transport", "uec, veroce, mrc, falcon, metaroce, or rocev2", transport);
     command.AddValue("pattern", "single, incast, all-to-all, or ring-allreduce", pattern);
     command.AddValue("ringInterleaved",
                      "Alternate first-half and second-half ranks in the AllReduce ring",
@@ -1335,7 +1326,9 @@ main(int argc, char* argv[])
     command.AddValue("measurementStartUs", "Measured traffic start time in us", measurementStartUs);
     command.AddValue("startGapNs", "Gap between measured message submissions in ns", startGapNs);
     command.AddValue("nsccBaseRttNs", "NSCC base RTT estimate in ns", nsccBaseRttNs);
-    command.AddValue("nsccTargetQueueDelayNs", "NSCC target queue delay in ns", nsccTargetQueueDelayNs);
+    command.AddValue("nsccTargetQueueDelayNs",
+                     "NSCC target queue delay in ns",
+                     nsccTargetQueueDelayNs);
     command.AddValue("nsccInitialWindowBytes",
                      "Initial NSCC congestion window per PDC in bytes",
                      nsccInitialWindowBytes);
@@ -1360,11 +1353,15 @@ main(int argc, char* argv[])
     command.AddValue("enableWorkConservingScheduler",
                      "Use endpoint weighted round-robin across job queues",
                      enableWorkConservingScheduler);
-    command.AddValue("enableEcn", "Install RED/ECN on the switched receiver-facing link", enableEcn);
+    command.AddValue("enableEcn",
+                     "Install RED/ECN on the switched receiver-facing link",
+                     enableEcn);
     command.AddValue("ecnMinBytes", "RED minimum ECN threshold in bytes", ecnMinBytes);
     command.AddValue("ecnMaxBytes", "RED maximum ECN threshold in bytes", ecnMaxBytes);
     command.AddValue("ecnQueueLimitBytes", "RED hard queue limit in bytes", ecnQueueLimitBytes);
-    command.AddValue("outputPrefix", "Prefix for per-message CSV, summary CSV, and JSON", outputPrefix);
+    command.AddValue("outputPrefix",
+                     "Prefix for per-message CSV, summary CSV, and JSON",
+                     outputPrefix);
     command.Parse(argc, argv);
     if (nodes < 2 || nodes > 250 || messages == 0 ||
         ParseAiTransportProtocol(transport) == AiTransportProtocol::UNKNOWN ||
@@ -1380,10 +1377,10 @@ main(int argc, char* argv[])
         (enableWorkConservingScheduler && ringJobWeight == 0) ||
         (fabric != "switched" && fabric != "leaf-spine" && fabric != "csma") ||
         (fabric == "leaf-spine" && (nodes < 4 || nodes % 2 != 0)) || linkDelayNs == 0 ||
-        queuePackets == 0 ||
-        nsccBaseRttNs < 128 || nsccTargetQueueDelayNs < 128 || nsccInitialWindowBytes == 0 ||
-        (enableEcn && (fabric == "csma" || ecnMinBytes == 0 ||
-                       ecnMinBytes >= ecnMaxBytes || ecnMaxBytes >= ecnQueueLimitBytes)) ||
+        queuePackets == 0 || nsccBaseRttNs < 128 || nsccTargetQueueDelayNs < 128 ||
+        nsccInitialWindowBytes == 0 ||
+        (enableEcn && (fabric == "csma" || ecnMinBytes == 0 || ecnMinBytes >= ecnMaxBytes ||
+                       ecnMaxBytes >= ecnQueueLimitBytes)) ||
         (warmupBytes > 0 && (!reusePdc || measurementStartUs == 0)))
     {
         return 2;

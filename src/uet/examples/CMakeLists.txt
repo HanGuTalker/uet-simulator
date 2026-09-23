@@ -11,6 +11,8 @@ build_lib_example(
   SOURCE_FILES uet-ai-workload-example.cc
   LIBRARIES_TO_LINK
     ${libai-transport}
+    ${libroce}
+    ${libveroce}
     ${libuet}
     ${libnetwork}
     ${libinternet}
