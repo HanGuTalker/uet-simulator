@@ -10,6 +10,7 @@ build_lib_example(
   NAME uet-ai-workload-example
   SOURCE_FILES uet-ai-workload-example.cc
   LIBRARIES_TO_LINK
+    ${libai-transport}
     ${libuet}
     ${libnetwork}
     ${libinternet}

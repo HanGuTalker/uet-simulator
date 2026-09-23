@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "baseline_id": "uec-ai-base-800g-2026-09-20",
+  "captured_on": "2026-09-23",
+  "evidence_date": "2026-09-20",
+  "protocol": "UEC",
+  "profile": "AI Base",
+  "specification": "UEC 1.0.3",
+  "simulator": "ns-3.47",
+  "source_revision": "9ba92c6eada85519f42abedea86137b5cd686859",
+  "execution_policy": {
+    "mode": "existing-artifacts-only",
+    "full_regression_executed_during_capture": false,
+    "note": "The snapshot records previously verified artifacts; no long-running simulation was launched on 2026-09-23."
+  },
+  "coverage": {
+    "requirements_file": "requirements/ai-base.yaml",
+    "required_status": "verified",
+    "mandatory_ids": [
+      "SES-1", "SES-2", "SES-3", "SES-6", "SES-7", "SES-9",
+      "SES-15", "SES-16", "SES-19", "SES-21", "SES-26", "SES-29",
+      "SES-33", "SES-35", "SES-38", "PDS-1", "PDS-2", "PDS-4",
+      "PDS-5", "CMS-1"
+    ]
+  },
+  "common_network": {
+    "link_rate": "800Gbps",
+    "link_rate_bps": 800000000000,
+    "link_delay_ns": 1000,
+    "payload_mtu_bytes": 4096,
+    "nscc_base_rtt_ns_switched": 4200
+  },
+  "experiments": [
+    {
+      "id": "steady-single-4node",
+      "script": "scripts/uec/run_steady_single_800g.sh",
+      "documentation": "docs/uet/steady-single-800g-results.md",
+      "summary": "results/steady-800g/steady-single-summary.json",
+      "assertions": {
+        "pattern": "single",
+        "fabric": "switched",
+        "link_rate_bps": 800000000000,
+        "messages.completed": 4,
+        "messages.expected": 4,
+        "goodput_bps": 777882133387.426,
+        "latency_ns.mean": 690170.0,
+        "latency_ns.p99": 690170,
+        "protocol_events.retransmissions": 0,
+        "protocol_events.ecn_marks": 0
+      }
+    },
+    {
+      "id": "steady-incast-4node",
+      "script": "scripts/uec/run_steady_incast_800g.sh",
+      "documentation": "docs/uet/steady-incast-800g-results.md",
+      "summary": "results/steady-incast-800g/steady-incast-summary.json",
+      "assertions": {
+        "pattern": "incast",
+        "fabric": "switched",
+        "link_rate_bps": 800000000000,
+        "messages.completed": 12,
+        "messages.expected": 12,
+        "goodput_bps": 779486840758.428,
+        "latency_ns.mean": 2066167.0,
+        "latency_ns.p99": 2066426,
+        "protocol_events.retransmissions": 0,
+        "protocol_events.ecn_marks": 0
+      }
+    },
+    {
+      "id": "all-to-all-4node-4mib",
+      "script": "scripts/uec/run_collectives_800g.sh",
+      "documentation": "docs/uet/collectives-800g-results.md",
+      "summary": "results/collectives-800g/all-to-all/4MiB/ecn-all-to-all-summary.json",
+      "assertions": {
+        "pattern": "all-to-all",
+        "fabric": "switched",
+        "link_rate_bps": 800000000000,
+        "messages.completed": 24,
+        "messages.expected": 24,
+        "goodput_bps": 2952673877494.152,
+        "latency_ns.mean": 136055.125,
+        "latency_ns.p99": 138496,
+        "protocol_events.retransmissions": 0,
+        "ecn_queue.marked_packets": 0
+      }
+    },
+    {
+      "id": "ring-allreduce-4node-4mib",
+      "script": "scripts/uec/run_collectives_800g.sh",
+      "documentation": "docs/uet/collectives-800g-results.md",
+      "summary": "results/collectives-800g/ring-allreduce/4MiB/ecn-ring-allreduce-summary.json",
+      "assertions": {
+        "pattern": "ring-allreduce",
+        "fabric": "switched",
+        "link_rate_bps": 800000000000,
+        "messages.completed": 48,
+        "messages.expected": 48,
+        "ring_allreduce.collectives": 2,
+        "goodput_bps": 1537947779322.567,
+        "latency_ns.mean": 21817.667,
+        "latency_ns.p99": 37512,
+        "protocol_events.retransmissions": 0,
+        "ecn_queue.marked_packets": 0
+      }
+    },
+    {
+      "id": "congested-all-to-all-8node-16mib",
+      "script": "scripts/uec/run_leaf_spine_validation_800g.sh",
+      "documentation": "docs/uet/leaf-spine-validation-800g.md",
+      "summary": "results/collectives-800g-8node/leaf-spine-validation/16MiB/ecn-all-to-all-summary.json",
+      "assertions": {
+        "pattern": "all-to-all",
+        "fabric": "leaf-spine",
+        "link_rate_bps": 800000000000,
+        "messages.completed": 56,
+        "messages.expected": 56,
+        "goodput_bps": 1982221848081.73,
+        "latency_ns.p99": 3791802,
+        "ecn_queue.marked_packets": 4027,
+        "ecn_queue.dropped_packets": 0,
+        "protocol_events.retransmissions": 0
+      }
+    },
+    {
+      "id": "congested-ring-allreduce-8node-interleaved-4mib",
+      "script": "scripts/uec/run_leaf_spine_validation_800g.sh",
+      "documentation": "docs/uet/leaf-spine-validation-800g.md",
+      "summary": "results/collectives-800g-8node/leaf-spine-validation/ring-allreduce-4MiB-interleaved/ecn-ring-allreduce-summary.json",
+      "assertions": {
+        "pattern": "ring-allreduce",
+        "fabric": "leaf-spine",
+        "link_rate_bps": 800000000000,
+        "messages.completed": 224,
+        "messages.expected": 224,
+        "ring_allreduce.interleaved": true,
+        "goodput_bps": 789713807323.178,
+        "latency_ns.p99": 58256,
+        "ecn_queue.marked_packets": 38,
+        "ecn_queue.dropped_packets": 0,
+        "protocol_events.retransmissions": 0
+      }
+    }
+  ]
+}

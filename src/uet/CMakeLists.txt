@@ -2,6 +2,7 @@ build_lib(
   LIBNAME uet
   SOURCE_FILES
     helper/uet-helper.cc
+    helper/uet-transport-adapter.cc
     helper/uet-udp-transport.cc
     model/uet-endpoint.cc
     model/uet-crc-trailer.cc
@@ -14,6 +15,7 @@ build_lib(
     model/uet-simulation-tag.cc
   HEADER_FILES
     helper/uet-helper.h
+    helper/uet-transport-adapter.h
     helper/uet-udp-transport.h
     model/uet-endpoint.h
     model/uet-crc-trailer.h
@@ -26,6 +28,7 @@ build_lib(
     model/uet-simulation-tag.h
     model/uet-types.h
   LIBRARIES_TO_LINK
+    ${libai-transport}
     ${libcore}
     ${libnetwork}
     ${libinternet}

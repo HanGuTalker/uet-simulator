@@ -8,5 +8,5 @@ python3 ./ns3 configure \
   --build-profile=debug \
   --enable-tests \
   --enable-examples \
-  --enable-modules=uet \
+  --enable-modules=uet,ai-transport \
   -- -G Ninja

@@ -5,7 +5,7 @@
 - Ultra Ethernet Specification: **1.0.3**, released 2026-07-16.
 - Implemented profile: **AI Base** only.
 - Simulator baseline: **ns-3.47**, tag `ns-3.47`.
-- Development branch: `uec-ai-base`.
+- Frozen comparison baseline: commit `9ba92c6eada85519f42abedea86137b5cd686859` on `main`.
 
 The UEC specification is the normative source. The public Transport Matrix and Checklist,
 revision 0.8 dated 2025-06-10, is used as a requirements index only because it predates

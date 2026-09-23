@@ -18,10 +18,14 @@ Protocol counters include retransmissions, timeouts, NACKs, received ECN marks a
 Transport counters include transmitted/received UDP datagrams plus path-MTU and CRC drops. These
 counters are aggregate totals across every endpoint in the run.
 
+New outputs use schema version 2 and include the canonical `protocol` field in JSON and CSV rows.
+Schema version 1 files created before the common transport migration remain valid frozen UEC
+artifacts; they implicitly describe UEC.
+
 Example:
 
 ```bash
-./ns3 run "uet-ai-workload-example --pattern=incast \
+./ns3 run "uet-ai-workload-example --transport=uec --pattern=incast \
   --nodes=4 --messages=4 --payloadBytes=4096 \
   --outputPrefix=results/uec-4node"
 ```

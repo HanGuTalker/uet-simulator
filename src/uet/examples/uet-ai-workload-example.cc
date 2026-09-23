@@ -5,6 +5,7 @@
 
 #include "ns3/core-module.h"
 #include "ns3/csma-module.h"
+#include "ns3/ai-transport-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
@@ -33,6 +34,7 @@ class AiWorkload
     bool Run(uint32_t nodeCount,
              uint32_t messages,
              uint32_t payloadBytes,
+             const std::string& transportName,
              const std::string& pattern,
              bool ringInterleaved,
              const std::string& fabricType,
@@ -63,6 +65,7 @@ class AiWorkload
         m_nodeCount = nodeCount;
         m_messagesPerPair = messages;
         m_payloadBytes = payloadBytes;
+        m_transportName = transportName;
         m_pattern = pattern;
         m_ringInterleaved = ringInterleaved;
         m_fabricType = fabricType;
@@ -262,33 +265,36 @@ class AiWorkload
             }
         }
 
+        const auto protocol = ParseAiTransportProtocol(transportName);
+        AiTransportFactory transportFactory;
+        transportFactory.Register(AiTransportProtocol::UEC, UetTransportAdapter::GetTypeId());
+        if (protocol == AiTransportProtocol::UNKNOWN || !transportFactory.IsRegistered(protocol))
+        {
+            std::cerr << "Transport '" << transportName
+                      << "' is known to the common framework but has no registered implementation"
+                      << std::endl;
+            return false;
+        }
+        m_transportName = ToString(protocol);
         m_endpoints.resize(nodeCount);
-        m_transports.resize(nodeCount);
         for (uint32_t i = 0; i < nodeCount; ++i)
         {
-            m_endpoints[i] = CreateObject<UetEndpoint>();
-            m_endpoints[i]->SetAttribute("EndpointId", UintegerValue(i + 1));
-            m_endpoints[i]->SetAttribute("MaxRetransmissions", UintegerValue(16));
-            m_endpoints[i]->SetAttribute("NsccLineRateBps", UintegerValue(linkRateBps));
-            m_endpoints[i]->SetAttribute("NsccInitialWindow",
-                                         UintegerValue(m_nsccInitialWindowBytes));
-            m_endpoints[i]->SetAttribute("NsccBaseRtt",
-                                         TimeValue(NanoSeconds(nsccBaseRttNs)));
-            m_endpoints[i]->SetAttribute("NsccTargetQueueDelay",
-                                         TimeValue(NanoSeconds(nsccTargetQueueDelayNs)));
-            if (enableWorkConservingScheduler)
-            {
-                m_endpoints[i]->ConfigureJobScheduler(linkRateBps);
-            }
             const uint64_t baseRttNs = 4ULL * linkDelayNs + 200ULL;
             const uint64_t bdpBytes = (linkRateBps * baseRttNs) / 8000000000ULL;
-            m_endpoints[i]->SetAttribute(
-                "NsccMaximumWindow",
-                UintegerValue(static_cast<uint32_t>(std::min<uint64_t>(
-                    std::numeric_limits<uint32_t>::max(),
-                    std::max<uint64_t>(65536, (3 * bdpBytes) / 2)))));
-            m_transports[i] = CreateObject<UetUdpTransport>();
-            if (!m_transports[i]->Bind(nodes.Get(i), m_endpoints[i]))
+            AiTransportEndpointConfig endpointConfig;
+            endpointConfig.endpointId = i + 1;
+            endpointConfig.payloadMtuBytes = 4096;
+            endpointConfig.maxRetransmissions = 16;
+            endpointConfig.lineRateBps = linkRateBps;
+            endpointConfig.initialWindowBytes = m_nsccInitialWindowBytes;
+            endpointConfig.maximumWindowBytes = static_cast<uint32_t>(std::min<uint64_t>(
+                std::numeric_limits<uint32_t>::max(),
+                std::max<uint64_t>(65536, (3 * bdpBytes) / 2)));
+            endpointConfig.baseRtt = NanoSeconds(nsccBaseRttNs);
+            endpointConfig.targetQueueDelay = NanoSeconds(nsccTargetQueueDelayNs);
+            endpointConfig.workConservingScheduler = enableWorkConservingScheduler;
+            m_endpoints[i] = transportFactory.Create(protocol);
+            if (!m_endpoints[i] || !m_endpoints[i]->Initialize(nodes.Get(i), endpointConfig))
             {
                 return false;
             }
@@ -311,8 +317,8 @@ class AiWorkload
                 "CongestionWindow",
                 MakeBoundCallback(&AiWorkload::CongestionWindowSink, this, i + 1));
             m_endpoints[i]->TraceConnectWithoutContext(
-                "PacketRx",
-                MakeBoundCallback(&AiWorkload::ReceiverPacketSink, this));
+                "PayloadRx",
+                MakeBoundCallback(&AiWorkload::ReceiverPayloadSink, this));
         }
         for (uint32_t i = 0; i < nodeCount; ++i)
         {
@@ -320,7 +326,10 @@ class AiWorkload
             {
                 if (i != j)
                 {
-                    m_transports[i]->AddPeer(j + 1, endpointAddresses[j]);
+                    if (!m_endpoints[i]->AddPeer(j + 1, endpointAddresses[j].ConvertTo()))
+                    {
+                        return false;
+                    }
                 }
             }
         }
@@ -354,11 +363,20 @@ class AiWorkload
             }
             for (uint32_t source = 0; source < nodeCount; ++source)
             {
-                auto pdc = CreateConfiguredPdc(source, 0, 0, m_ringPdcLineRateBps);
-                m_ringPdcIds[source] = pdc->GetPdcId();
+                const uint32_t pdcId =
+                    CreateConfiguredConnection(source,
+                                               m_ringTargetBySource[source],
+                                               0,
+                                               0,
+                                               m_ringPdcLineRateBps);
+                if (pdcId == 0)
+                {
+                    return false;
+                }
+                m_ringPdcIds[source] = pdcId;
                 if (enableWorkConservingScheduler)
                 {
-                    m_endpoints[source]->AssignPdcToJob(pdc->GetPdcId(), 1, ringJobWeight);
+                    m_endpoints[source]->AssignConnectionToJob(pdcId, 1, ringJobWeight);
                 }
                 if (warmupBytes > 0)
                 {
@@ -369,7 +387,7 @@ class AiWorkload
                                         this,
                                         source,
                                         m_ringTargetBySource[source],
-                                        pdc->GetPdcId(),
+                                        pdcId,
                                         warmupId,
                                         warmupBytes);
                 }
@@ -379,7 +397,7 @@ class AiWorkload
                                         &AiWorkload::CaptureCongestionWindow,
                                         this,
                                         source,
-                                        pdc->GetPdcId());
+                                        pdcId);
                 }
             }
             m_ringMessageIds.resize(messages);
@@ -420,15 +438,21 @@ class AiWorkload
                         {
                             continue;
                         }
-                        auto pdc = CreateConfiguredPdc(source,
-                                                       group + 1,
-                                                       m_backgroundPdcInitialWindowBytes,
-                                                       m_backgroundPdcLineRateBps);
+                        const uint32_t pdcId = CreateConfiguredConnection(
+                            source,
+                            target + 1,
+                            group + 1,
+                            m_backgroundPdcInitialWindowBytes,
+                            m_backgroundPdcLineRateBps);
+                        if (pdcId == 0)
+                        {
+                            return false;
+                        }
                         if (enableWorkConservingScheduler)
                         {
-                            m_endpoints[source]->AssignPdcToJob(pdc->GetPdcId(),
-                                                                2 + group,
-                                                                backgroundJobWeight);
+                            m_endpoints[source]->AssignConnectionToJob(pdcId,
+                                                                       2 + group,
+                                                                       backgroundJobWeight);
                         }
                         const uint64_t id = messageId++;
                         const Time scheduled = MicroSeconds(measurementStartUs) +
@@ -446,7 +470,7 @@ class AiWorkload
                                             this,
                                             source,
                                             target + 1,
-                                            pdc->GetPdcId(),
+                                            pdcId,
                                             id,
                                             backgroundPayloadBytes);
                     }
@@ -464,10 +488,14 @@ class AiWorkload
                 {
                     continue;
                 }
-                Ptr<UetPdc> reusedPdc;
+                uint32_t reusedConnectionId = 0;
                 if (reusePdc)
                 {
-                    reusedPdc = CreateConfiguredPdc(source, 0);
+                    reusedConnectionId = CreateConfiguredConnection(source, target + 1, 0);
+                    if (reusedConnectionId == 0)
+                    {
+                        return false;
+                    }
                     if (warmupBytes > 0)
                     {
                         const uint64_t warmupId = messageId++;
@@ -477,7 +505,7 @@ class AiWorkload
                                             this,
                                             source,
                                             target + 1,
-                                            reusedPdc->GetPdcId(),
+                                            reusedConnectionId,
                                             warmupId,
                                             warmupBytes);
                     }
@@ -488,13 +516,21 @@ class AiWorkload
                                             &AiWorkload::CaptureCongestionWindow,
                                             this,
                                             source,
-                                            reusedPdc->GetPdcId());
+                                            reusedConnectionId);
                     }
                 }
                 uint64_t previousMessageId = 0;
                 for (uint32_t occurrence = 0; occurrence < messages; ++occurrence)
                 {
-                    auto pdc = reusePdc ? reusedPdc : CreateConfiguredPdc(source, occurrence);
+                    const uint32_t pdcId = reusePdc
+                                               ? reusedConnectionId
+                                               : CreateConfiguredConnection(source,
+                                                                            target + 1,
+                                                                            occurrence);
+                    if (pdcId == 0)
+                    {
+                        return false;
+                    }
                     const uint64_t id = messageId++;
                     const Time scheduled = NanoSeconds(
                         measurementStartUs * 1000ULL +
@@ -516,7 +552,7 @@ class AiWorkload
                             previousMessageId,
                             PendingSubmission{source,
                                               target + 1,
-                                              pdc->GetPdcId(),
+                                              pdcId,
                                               id,
                                               payloadBytes});
                     }
@@ -529,7 +565,7 @@ class AiWorkload
                                             this,
                                             source,
                                             target + 1,
-                                            pdc->GetPdcId(),
+                                            pdcId,
                                             id,
                                             payloadBytes);
                     }
@@ -564,17 +600,35 @@ class AiWorkload
         bool completed{false};
     };
 
-    Ptr<UetPdc> CreateConfiguredPdc(uint32_t source,
-                                    uint32_t occurrence,
-                                    uint32_t initialWindow = 0,
-                                    uint64_t lineRateBps = 0)
+    uint32_t CreateConfiguredConnection(uint32_t source,
+                                        uint32_t target,
+                                        uint32_t occurrence,
+                                        uint32_t initialWindow = 0,
+                                        uint64_t lineRateBps = 0)
     {
-        auto pdc =
-            m_endpoints[source]->CreatePdc(UetDeliveryMode::RUD, initialWindow, lineRateBps);
-        m_endpoints[source]->TransitionPdc(pdc->GetPdcId(), UetPdcState::OPENING);
-        pdc->SetAttribute("RetransmissionTimeout",
-                          TimeValue(MicroSeconds(50 + source * 7 + occurrence * 3)));
-        return pdc;
+        AiTransportConnectionConfig config;
+        config.remoteEndpointId = target;
+        config.reliability = AiTransportReliability::RELIABLE_UNORDERED;
+        config.initialWindowBytes = initialWindow;
+        config.lineRateBps = lineRateBps;
+        config.retransmissionTimeout = MicroSeconds(50 + source * 7 + occurrence * 3);
+        return m_endpoints[source]->OpenConnection(config);
+    }
+
+    bool SubmitData(uint32_t source,
+                    uint32_t target,
+                    uint32_t connectionId,
+                    uint64_t messageId,
+                    uint32_t payloadBytes)
+    {
+        AiTransportRequest request;
+        request.remoteEndpointId = target;
+        request.connectionId = connectionId;
+        request.messageId = messageId;
+        request.operation = AiTransportOperation::MESSAGE;
+        request.reliability = AiTransportReliability::RELIABLE_UNORDERED;
+        request.payload = Create<Packet>(payloadBytes);
+        return m_endpoints[source]->Submit(request);
     }
 
     void SubmitWarmup(uint32_t source,
@@ -584,10 +638,7 @@ class AiWorkload
                       uint32_t payloadBytes)
     {
         ++m_warmupsAttempted;
-        if (m_endpoints[source]->SendRudMessage(target,
-                                                pdcId,
-                                                messageId,
-                                                Create<Packet>(payloadBytes)))
+        if (SubmitData(source, target, pdcId, messageId, payloadBytes))
         {
             ++m_warmupsSubmitted;
         }
@@ -661,10 +712,7 @@ class AiWorkload
             record.scheduledNs = Simulator::Now().GetNanoSeconds();
         }
         record.submittedNs = Simulator::Now().GetNanoSeconds();
-        record.submitted = m_endpoints[source]->SendRudMessage(target,
-                                                               pdcId,
-                                                               messageId,
-                                                               Create<Packet>(payloadBytes));
+        record.submitted = SubmitData(source, target, pdcId, messageId, payloadBytes);
     }
 
     void StartRingStep(uint32_t collective, uint32_t step)
@@ -673,8 +721,8 @@ class AiWorkload
         {
             for (uint32_t source = 0; source < m_ringPdcIds.size(); ++source)
             {
-                m_endpoints[source]->SetPdcCongestionWindow(m_ringPdcIds[source],
-                                                             m_nsccInitialWindowBytes);
+                m_endpoints[source]->SetCongestionWindow(m_ringPdcIds[source],
+                                                         m_nsccInitialWindowBytes);
             }
         }
         m_ringCurrentCollective = collective;
@@ -761,7 +809,7 @@ class AiWorkload
             {
                 for (uint32_t source = 0; source < m_ringPdcIds.size(); ++source)
                 {
-                    m_endpoints[source]->SetPdcLineRate(m_ringPdcIds[source], m_linkRateBps);
+                    m_endpoints[source]->SetConnectionRate(m_ringPdcIds[source], m_linkRateBps);
                 }
                 m_jobRateReleasedNs = Simulator::Now().GetNanoSeconds();
             }
@@ -843,36 +891,13 @@ class AiWorkload
             {Simulator::Now().GetNanoSeconds(), egressEndpoint, oldBytes, newBytes});
     }
 
-    static void ReceiverPacketSink(AiWorkload* workload,
-                                   Ptr<const Packet> packet,
-                                   uint32_t,
-                                   uint32_t)
+    static void ReceiverPayloadSink(AiWorkload* workload,
+                                    uint32_t sourceEndpointId,
+                                    uint32_t payloadBytes)
     {
-        if (!packet)
-        {
-            return;
-        }
-        UetSimulationTag route;
-        if (!packet->PeekPacketTag(route))
-        {
-            return;
-        }
-        auto copy = packet->Copy();
-        UetPdsHeader pds;
-        if (copy->RemoveHeader(pds) == 0 ||
-            (pds.GetType() != UetPdsType::RUD_REQUEST &&
-             pds.GetType() != UetPdsType::ROD_REQUEST))
-        {
-            return;
-        }
-        UetSesStandardHeader ses;
-        if (copy->RemoveHeader(ses) == 0)
-        {
-            return;
-        }
         const int64_t nowNs = Simulator::Now().GetNanoSeconds();
         const int64_t binNs = (nowNs / workload->m_throughputBinNs) * workload->m_throughputBinNs;
-        workload->m_rxPayloadBins[route.GetSourceEndpointId()][binNs] += ses.GetPayloadLength();
+        workload->m_rxPayloadBins[sourceEndpointId][binNs] += payloadBytes;
     }
 
     void DeviceQueueDrop(Ptr<const Packet>)
@@ -882,12 +907,13 @@ class AiWorkload
 
     void CollectTransportCounters()
     {
-        for (const auto& transport : m_transports)
+        for (const auto& endpoint : m_endpoints)
         {
-            m_txDatagrams += transport->GetTransmittedDatagrams();
-            m_rxDatagrams += transport->GetReceivedDatagrams();
-            m_mtuDrops += transport->GetMtuDrops();
-            m_crcDrops += transport->GetCrcDrops();
+            const auto counters = endpoint->GetCounters();
+            m_txDatagrams += counters.transmittedDatagrams;
+            m_rxDatagrams += counters.receivedDatagrams;
+            m_mtuDrops += counters.mtuDrops;
+            m_crcDrops += counters.integrityDrops;
         }
     }
 
@@ -1004,13 +1030,14 @@ class AiWorkload
             }
         }
 
-        messages << "pattern,node_count,group_id,message_id,source,target,bytes,scheduled_ns,submitted,"
+        messages << "protocol,pattern,node_count,group_id,message_id,source,target,bytes,scheduled_ns,submitted,"
                     "submitted_ns,completed,completed_ns,latency_ns\n";
         for (const auto& [id, record] : m_records)
         {
             const auto group = m_messageGroups.find(id);
             const uint32_t groupId = group == m_messageGroups.end() ? 0 : group->second;
-            messages << m_pattern << ',' << m_nodeCount << ',' << groupId << ',' << id << ','
+            messages << m_transportName << ',' << m_pattern << ',' << m_nodeCount << ',' << groupId
+                     << ',' << id << ','
                      << record.source << ','
                      << record.target << ',' << record.bytes << ',' << record.scheduledNs << ','
                      << (record.submitted ? 1 : 0) << ',' << record.submittedNs << ','
@@ -1018,7 +1045,7 @@ class AiWorkload
                      << record.latencyNs << '\n';
         }
 
-        collectives << "pattern,collective_id,tensor_bytes,chunk_bytes,steps,submitted_ns,"
+        collectives << "protocol,pattern,collective_id,tensor_bytes,chunk_bytes,steps,submitted_ns,"
                        "completed_ns,latency_ns\n";
         for (uint32_t i = 0; i < m_ringCollectives.size(); ++i)
         {
@@ -1026,14 +1053,15 @@ class AiWorkload
             const int64_t latency = collective.completedNs < 0 || collective.submittedNs < 0
                                         ? -1
                                         : collective.completedNs - collective.submittedNs;
-            collectives << m_pattern << ',' << i + 1 << ',' << m_payloadBytes << ','
+            collectives << m_transportName << ',' << m_pattern << ',' << i + 1 << ','
+                        << m_payloadBytes << ','
                         << m_ringChunkBytes << ',' << m_ringStepsPerCollective << ','
                         << collective.submittedNs << ',' << collective.completedNs << ','
                         << latency << '\n';
         }
 
         const std::string header =
-            "pattern,fabric,link_rate,link_rate_bps,link_delay_ns,queue_packets,node_count,"
+            "protocol,pattern,fabric,link_rate,link_rate_bps,link_delay_ns,queue_packets,node_count,"
             "messages_per_pair,payload_bytes,reuse_pdc,warmup_bytes,warmups_attempted,"
             "warmups_submitted,warmups_completed,measurement_start_us,start_gap_ns,background_start_offset_ns,"
             "nscc_base_rtt_ns,nscc_target_queue_delay_ns,nscc_initial_window_bytes,"
@@ -1045,7 +1073,8 @@ class AiWorkload
             "goodput_bps,mean_latency_ns,p50_latency_ns,p95_latency_ns,p99_latency_ns,"
             "max_latency_ns,retransmissions,timeouts,nacks,ecn_marks,trimmed_packets,tx_datagrams,"
             "rx_datagrams,mtu_drops,crc_drops,device_queue_drops\n";
-        summaries << header << m_pattern << ',' << m_fabricType << ',' << m_linkRate << ','
+        summaries << header << m_transportName << ',' << m_pattern << ',' << m_fabricType << ','
+                  << m_linkRate << ','
                   << m_linkRateBps << ',' << m_linkDelayNs << ',' << m_queuePackets << ','
                   << m_nodeCount << ',' << m_messagesPerPair << ',' << m_payloadBytes << ','
                   << (m_reusePdc ? 1 : 0) << ',' << m_warmupBytes << ',' << m_warmupsAttempted
@@ -1071,7 +1100,8 @@ class AiWorkload
                   << m_mtuDrops << ',' << m_crcDrops << ',' << m_deviceQueueDrops << '\n';
 
         json << std::fixed << std::setprecision(3) << "{\n"
-             << "  \"schema_version\": 1,\n"
+             << "  \"schema_version\": 2,\n"
+             << "  \"protocol\": \"" << m_transportName << "\",\n"
              << "  \"pattern\": \"" << m_pattern << "\",\n"
              << "  \"fabric\": \"" << m_fabricType << "\",\n"
              << "  \"link_rate\": \"" << m_linkRate << "\",\n"
@@ -1148,7 +1178,7 @@ class AiWorkload
 
     void PrintSummary(const Summary& summary, const std::string& outputPrefix) const
     {
-        std::cout << std::fixed << std::setprecision(3) << m_pattern
+        std::cout << std::fixed << std::setprecision(3) << m_transportName << '/' << m_pattern
                   << ": completed=" << summary.completed << '/' << summary.expected
                   << " completion=" << summary.completionRate * 100.0 << "%"
                   << " goodput=" << summary.goodputBps / 1e9 << " Gbps"
@@ -1171,6 +1201,7 @@ class AiWorkload
     uint32_t m_nodeCount{0};
     uint32_t m_messagesPerPair{0};
     uint32_t m_payloadBytes{0};
+    std::string m_transportName{"uec"};
     std::string m_pattern;
     std::string m_fabricType;
     std::string m_linkRate;
@@ -1202,8 +1233,7 @@ class AiWorkload
     uint32_t m_ecnMaxBytes{409600};
     uint32_t m_ecnQueueLimitBytes{2097152};
     std::vector<Ptr<QueueDisc>> m_bottleneckQueueDiscs;
-    std::vector<Ptr<UetEndpoint>> m_endpoints;
-    std::vector<Ptr<UetUdpTransport>> m_transports;
+    std::vector<Ptr<AiTransportEndpoint>> m_endpoints;
     std::map<uint64_t, MessageRecord> m_records;
     std::map<uint64_t, uint32_t> m_messageGroups;
     std::map<uint64_t, PendingSubmission> m_chainedSubmissions;
@@ -1259,6 +1289,7 @@ main(int argc, char* argv[])
     uint32_t nodes = 4;
     uint32_t messages = 4;
     uint32_t payloadBytes = 4096;
+    std::string transport = "uec";
     std::string pattern = "incast";
     bool ringInterleaved = false;
     std::string fabric = "switched";
@@ -1288,6 +1319,9 @@ main(int argc, char* argv[])
     command.AddValue("nodes", "Number of endpoints (at least two)", nodes);
     command.AddValue("messages", "Messages per pair, or collectives for ring-allreduce", messages);
     command.AddValue("payloadBytes", "Bytes per message, or tensor bytes per AllReduce rank", payloadBytes);
+    command.AddValue("transport",
+                     "uec, veroce, mrc, falcon, metaroce, or rocev2",
+                     transport);
     command.AddValue("pattern", "single, incast, all-to-all, or ring-allreduce", pattern);
     command.AddValue("ringInterleaved",
                      "Alternate first-half and second-half ranks in the AllReduce ring",
@@ -1333,6 +1367,7 @@ main(int argc, char* argv[])
     command.AddValue("outputPrefix", "Prefix for per-message CSV, summary CSV, and JSON", outputPrefix);
     command.Parse(argc, argv);
     if (nodes < 2 || nodes > 250 || messages == 0 ||
+        ParseAiTransportProtocol(transport) == AiTransportProtocol::UNKNOWN ||
         (pattern != "single" && pattern != "incast" && pattern != "all-to-all" &&
          pattern != "ring-allreduce") ||
         (pattern == "ring-allreduce" && payloadBytes % nodes != 0) ||
@@ -1358,6 +1393,7 @@ main(int argc, char* argv[])
     return workload.Run(nodes,
                         messages,
                         payloadBytes,
+                        transport,
                         pattern,
                         ringInterleaved,
                         fabric,

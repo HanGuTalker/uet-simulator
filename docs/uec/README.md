@@ -4,6 +4,7 @@ This directory defines the engineering baseline for the UEC AI Base simulation m
 
 - `specification-baseline.md` pins the normative source and amendment policy.
 - `simulation-scope.md` records fidelity decisions and explicit exclusions.
+- `implementation-inventory.md` records the frozen code inventory and unresolved multipath gap.
 - `development-environment.md` records the reproducible build environment.
 - `packet-model.md` defines implemented UEC wire codecs and their migration state.
 - `wire-format-migration.md` tracks removal of the legacy behavioral envelope.
@@ -16,8 +17,13 @@ This directory defines the engineering baseline for the UEC AI Base simulation m
 - `trace-contract.md` defines stable trace names and payloads.
 - `validation.md` records the repeatable test matrix and latest verified results.
 - `performance-output.md` defines workload metrics and the CSV/JSON output schema.
+- `baseline-freeze-800g.md` freezes the UEC reference used by later multi-protocol comparisons.
 - `baseline-400g-results.md` records the completed unloaded 400 Gbps switched-fabric experiment.
 - `../../requirements/ai-base.yaml` is the machine-readable requirement index.
+- `../../requirements/uec-baseline-800g.json` is the machine-readable frozen baseline manifest.
 
 The implementation is a packet-level behavioral simulator. It is not a UEC compliance
 certification tool.
+
+The protocol-neutral interface used for multi-transport comparisons is documented in
+`../transport/common-architecture.md`.

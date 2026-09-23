@@ -7,7 +7,7 @@
 - FEP and PDC lifecycle behavior.
 - RUD, ROD, and UUD delivery modes.
 - NSCC signals and sender-side control behavior.
-- ECN, loss, reordering, per-packet path selection, and optional switch trimming.
+- ECN, loss, reordering, path metadata/trace hooks, and optional switch trimming.
 - AI communication workloads: parameterized incast and all-to-all traffic.
 - IPv4/UDP and IPv6/UDP encapsulation, ECN transport markings, path-MTU rejection, and CRC32C.
 
@@ -30,6 +30,8 @@ implementation. Results must identify assumed versus measured inputs.
   collectives.
 - Full libfabric or framework integration.
 - Real-time emulation or hardware-in-the-loop behavior.
+- Endpoint-controlled multipath scheduling and per-path NSCC state. The current sender assigns
+  `pathId=0`; the existing path field, enable flag and trace source are integration plumbing only.
 
 ## Accuracy statement
 

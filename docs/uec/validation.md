@@ -46,3 +46,10 @@ single-flow, incast, and aggregate all-to-all goodput were 329.44, 384.36, and 1
 
 These checks establish regression, network-integration and memory-safety coverage for the ns-3
 model. They do not constitute formal UEC certification.
+
+## Frozen comparison snapshot
+
+On 2026-09-23 the existing 800 Gbps result artifacts were indexed in
+`requirements/uec-baseline-800g.json` for later multi-protocol comparisons. No simulation or full
+regression suite was run during that indexing step. The lightweight artifact checker and the
+recorded headline metrics are documented in `baseline-freeze-800g.md`.
