@@ -240,7 +240,8 @@ VeRoceTransportAdapter::Submit(const AiTransportRequest& request)
         return false;
     }
     const uint32_t msn = state.nextMessageSequence++;
-    state.messages.emplace(request.messageId, MessageState{totalBytes, fragments, read, false});
+    state.messages.emplace(request.messageId,
+                           MessageState{totalBytes, fragments, msn, read, false});
     uint32_t offset = 0;
     for (uint32_t fragment = 0; fragment < fragments; ++fragment)
     {
@@ -598,6 +599,7 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
         {
             const bool readRequest = IsRoceReadRequestOpcode(opcode);
             const bool readResponse = IsRoceReadResponseOpcode(opcode);
+            uint32_t associatedRequestMsn = 0;
             VeRoceMsnHeader msneth;
             if (packet->RemoveHeader(msneth) == 0)
             {
@@ -621,6 +623,7 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
                     ++m_counters.integrityDrops;
                     continue;
                 }
+                associatedRequestMsn = aeth.GetMessageSequence();
             }
             else if (IsRoceWriteOpcode(opcode) || readRequest)
             {
@@ -700,7 +703,8 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
                         if (connection != m_connections.end())
                         {
                             auto message = connection->second.messages.find(tag.GetMessageId());
-                            if (message != connection->second.messages.end())
+                            if (message != connection->second.messages.end() &&
+                                message->second.messageSequence == associatedRequestMsn)
                             {
                                 message->second.responseComplete = true;
                                 if (message->second.remainingPackets == 0)
@@ -1134,7 +1138,7 @@ VeRoceTransportAdapter::TransmitReadResponse(uint64_t responseKey,
     aeth.SetMessageSequence(pending->second.requestMessageSequence);
     packet->AddHeader(aeth);
     VeRoceMsnHeader msneth;
-    msneth.SetMessageSequence(pending->second.requestMessageSequence);
+    msneth.SetMessageSequence(pending->second.responseMessageSequence);
     packet->AddHeader(msneth);
     RoceBthHeader bth;
     bth.SetOpcode(pending->second.opcode);

@@ -93,6 +93,7 @@ class VeRoceTransportAdapter : public AiTransportEndpoint
     {
         uint32_t bytes{0};
         uint32_t remainingPackets{0};
+        uint32_t messageSequence{0};
         bool read{false};
         bool responseComplete{false};
     };
