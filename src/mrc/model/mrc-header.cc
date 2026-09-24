@@ -17,6 +17,8 @@ NS_OBJECT_ENSURE_REGISTERED(MrcCcStateHeader);
 NS_OBJECT_ENSURE_REGISTERED(MrcSethHeader);
 NS_OBJECT_ENSURE_REGISTERED(MrcNethHeader);
 NS_OBJECT_ENSURE_REGISTERED(MrcPethHeader);
+NS_OBJECT_ENSURE_REGISTERED(MrcErthHeader);
+NS_OBJECT_ENSURE_REGISTERED(MrcEethHeader);
 
 TypeId
 MrcMethHeader::GetTypeId()
@@ -700,6 +702,177 @@ MrcPethHeader::SetTimestamp(uint16_t v)
 
 uint16_t
 MrcPethHeader::GetTimestamp() const
+{
+    return m_timestamp;
+}
+
+TypeId
+MrcErthHeader::GetTypeId()
+{
+    static TypeId tid = TypeId("ns3::MrcErthHeader")
+                            .SetParent<Header>()
+                            .SetGroupName("Mrc")
+                            .AddConstructor<MrcErthHeader>();
+    return tid;
+}
+
+TypeId
+MrcErthHeader::GetInstanceTypeId() const
+{
+    return GetTypeId();
+}
+
+uint32_t
+MrcErthHeader::GetSerializedSize() const
+{
+    return SERIALIZED_SIZE;
+}
+
+void
+MrcErthHeader::Serialize(Buffer::Iterator i) const
+{
+    i.WriteHtonU16(static_cast<uint16_t>(m_operation) & 0x3);
+    i.WriteU8(0);
+    i.WriteU8(m_vendorInfo);
+    i.WriteHtonU32(m_portStatusMask);
+    i.WriteHtonU32(0);
+    i.WriteHtonU16(m_timestamp);
+    i.WriteHtonU16(0x0001);
+}
+
+uint32_t
+MrcErthHeader::Deserialize(Buffer::Iterator i)
+{
+    m_operation = static_cast<MrcEndpointOperation>(i.ReadNtohU16() & 0x3);
+    i.ReadU8();
+    m_vendorInfo = i.ReadU8();
+    m_portStatusMask = i.ReadNtohU32();
+    i.ReadNtohU32();
+    m_timestamp = i.ReadNtohU16();
+    i.ReadNtohU16();
+    return SERIALIZED_SIZE;
+}
+
+void
+MrcErthHeader::Print(std::ostream& os) const
+{
+    os << "op=" << +static_cast<uint8_t>(m_operation) << " ports=0x" << std::hex
+       << m_portStatusMask << std::dec << " timestamp=" << m_timestamp;
+}
+
+void
+MrcErthHeader::SetOperation(MrcEndpointOperation v)
+{
+    m_operation = v;
+}
+
+MrcEndpointOperation
+MrcErthHeader::GetOperation() const
+{
+    return m_operation;
+}
+
+void
+MrcErthHeader::SetPortStatusMask(uint32_t v)
+{
+    m_portStatusMask = v;
+}
+
+uint32_t
+MrcErthHeader::GetPortStatusMask() const
+{
+    return m_portStatusMask;
+}
+
+void
+MrcErthHeader::SetTimestamp(uint16_t v)
+{
+    m_timestamp = v;
+}
+
+uint16_t
+MrcErthHeader::GetTimestamp() const
+{
+    return m_timestamp;
+}
+
+TypeId
+MrcEethHeader::GetTypeId()
+{
+    static TypeId tid = TypeId("ns3::MrcEethHeader")
+                            .SetParent<Header>()
+                            .SetGroupName("Mrc")
+                            .AddConstructor<MrcEethHeader>();
+    return tid;
+}
+
+TypeId
+MrcEethHeader::GetInstanceTypeId() const
+{
+    return GetTypeId();
+}
+
+uint32_t
+MrcEethHeader::GetSerializedSize() const
+{
+    return SERIALIZED_SIZE;
+}
+
+void
+MrcEethHeader::Serialize(Buffer::Iterator i) const
+{
+    i.WriteHtonU16(static_cast<uint16_t>(m_operation) & 0x3);
+    i.WriteHtonU16(0);
+    for (uint32_t word = 0; word < 6; ++word)
+    {
+        i.WriteHtonU32(0);
+    }
+    i.WriteHtonU16(m_timestamp);
+    i.WriteHtonU16(0);
+    i.WriteHtonU32(0);
+}
+
+uint32_t
+MrcEethHeader::Deserialize(Buffer::Iterator i)
+{
+    m_operation = static_cast<MrcEndpointOperation>(i.ReadNtohU16() & 0x3);
+    i.ReadNtohU16();
+    for (uint32_t word = 0; word < 6; ++word)
+    {
+        i.ReadNtohU32();
+    }
+    m_timestamp = i.ReadNtohU16();
+    i.ReadNtohU16();
+    i.ReadNtohU32();
+    return SERIALIZED_SIZE;
+}
+
+void
+MrcEethHeader::Print(std::ostream& os) const
+{
+    os << "op=" << +static_cast<uint8_t>(m_operation) << " timestamp=" << m_timestamp;
+}
+
+void
+MrcEethHeader::SetOperation(MrcEndpointOperation v)
+{
+    m_operation = v;
+}
+
+MrcEndpointOperation
+MrcEethHeader::GetOperation() const
+{
+    return m_operation;
+}
+
+void
+MrcEethHeader::SetTimestamp(uint16_t v)
+{
+    m_timestamp = v;
+}
+
+uint16_t
+MrcEethHeader::GetTimestamp() const
 {
     return m_timestamp;
 }

@@ -3,9 +3,16 @@
  * SPDX-License-Identifier: GPL-2.0-only
  */
 
+#include "ns3/internet-stack-helper.h"
+#include "ns3/ipv4-address-helper.h"
 #include "ns3/mrc-header.h"
+#include "ns3/mrc-transport-adapter.h"
+#include "ns3/node-container.h"
 #include "ns3/packet.h"
+#include "ns3/point-to-point-helper.h"
 #include "ns3/roce-v2-header.h"
+#include "ns3/simulator.h"
+#include "ns3/string.h"
 #include "ns3/test.h"
 
 using namespace ns3;
@@ -41,6 +48,33 @@ class MrcReliabilityHeaderTestCase : public TestCase
         NS_TEST_EXPECT_MSG_EQ(decodedAeth.GetSyndrome(),
                               RoceAethHeader::INVALID_REQUEST_NAK_SYNDROME,
                               "Invalid-request transport NAK syndrome changed");
+
+        MrcErthHeader endpointRequest;
+        endpointRequest.SetOperation(MrcEndpointOperation::PORT_STATUS_UPDATE);
+        endpointRequest.SetPortStatusMask(0xa5a55a5a);
+        endpointRequest.SetTimestamp(0x1234);
+        packet = Create<Packet>();
+        packet->AddHeader(endpointRequest);
+        NS_TEST_EXPECT_MSG_EQ(packet->GetSize(), 16, "ERTH wire size changed");
+        MrcErthHeader decodedRequest;
+        packet->RemoveHeader(decodedRequest);
+        NS_TEST_EXPECT_MSG_EQ(decodedRequest.GetPortStatusMask(),
+                              0xa5a55a5a,
+                              "ERTH port mask changed");
+        NS_TEST_EXPECT_MSG_EQ(decodedRequest.GetTimestamp(), 0x1234, "ERTH timestamp changed");
+
+        MrcEethHeader endpointResponse;
+        endpointResponse.SetOperation(MrcEndpointOperation::EV_PROBE);
+        endpointResponse.SetTimestamp(0x5678);
+        packet = Create<Packet>();
+        packet->AddHeader(endpointResponse);
+        NS_TEST_EXPECT_MSG_EQ(packet->GetSize(), 36, "EETH wire size changed");
+        MrcEethHeader decodedResponse;
+        packet->RemoveHeader(decodedResponse);
+        NS_TEST_EXPECT_MSG_EQ(static_cast<uint8_t>(decodedResponse.GetOperation()),
+                              static_cast<uint8_t>(MrcEndpointOperation::EV_PROBE),
+                              "EETH operation changed");
+        NS_TEST_EXPECT_MSG_EQ(decodedResponse.GetTimestamp(), 0x5678, "EETH timestamp changed");
 
         MrcCcStateHeader cc;
         cc.SetTimestamp(0x1234);
@@ -120,6 +154,54 @@ class MrcReliabilityHeaderTestCase : public TestCase
     }
 };
 
+class MrcEndpointOperationsTestCase : public TestCase
+{
+  public:
+    MrcEndpointOperationsTestCase()
+        : TestCase("MRC EV Probe and Port Status Update complete without QP state")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer nodes;
+        nodes.Create(2);
+        PointToPointHelper links;
+        links.SetDeviceAttribute("DataRate", StringValue("800Gbps"));
+        links.SetChannelAttribute("Delay", TimeValue(MicroSeconds(1)));
+        const NetDeviceContainer devices = links.Install(nodes);
+        InternetStackHelper internet;
+        internet.Install(nodes);
+        Ipv4AddressHelper addresses;
+        addresses.SetBase("10.99.0.0", "255.255.255.0");
+        const Ipv4InterfaceContainer interfaces = addresses.Assign(devices);
+
+        Ptr<MrcTransportAdapter> first = CreateObject<MrcTransportAdapter>();
+        Ptr<MrcTransportAdapter> second = CreateObject<MrcTransportAdapter>();
+        AiTransportEndpointConfig firstConfig;
+        firstConfig.endpointId = 1;
+        firstConfig.lineRateBps = 800000000000ULL;
+        AiTransportEndpointConfig secondConfig = firstConfig;
+        secondConfig.endpointId = 2;
+        NS_TEST_ASSERT_MSG_EQ(first->Initialize(nodes.Get(0), firstConfig), true, "first init");
+        NS_TEST_ASSERT_MSG_EQ(second->Initialize(nodes.Get(1), secondConfig), true, "second init");
+        NS_TEST_ASSERT_MSG_EQ(first->AddPeer(2, interfaces.GetAddress(1)), true, "first peer");
+        NS_TEST_ASSERT_MSG_EQ(second->AddPeer(1, interfaces.GetAddress(0)), true, "second peer");
+
+        Simulator::Schedule(NanoSeconds(1), [first]() { first->SendEvProbe(2, 3); });
+        Simulator::Schedule(NanoSeconds(1),
+                            [first]() { first->SendPortStatusUpdate(2, 0xa5, 1); });
+        Simulator::Stop(MilliSeconds(1));
+        Simulator::Run();
+
+        NS_TEST_EXPECT_MSG_EQ(first->IsPathReachable(2, 3), true, "EV path is not reachable");
+        NS_TEST_EXPECT_MSG_GT(first->GetPathRtt(2, 3).GetNanoSeconds(), 0, "EV RTT is missing");
+        NS_TEST_EXPECT_MSG_EQ(second->GetPeerPortStatusMask(1), 0xa5, "Port mask changed");
+        Simulator::Destroy();
+    }
+};
+
 class MrcHeaderTestSuite : public TestSuite
 {
   public:
@@ -127,6 +209,7 @@ class MrcHeaderTestSuite : public TestSuite
         : TestSuite("mrc-header", Type::UNIT)
     {
         AddTestCase(new MrcReliabilityHeaderTestCase, Duration::QUICK);
+        AddTestCase(new MrcEndpointOperationsTestCase, Duration::QUICK);
     }
 };
 

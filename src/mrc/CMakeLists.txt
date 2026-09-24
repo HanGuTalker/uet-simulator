@@ -13,6 +13,7 @@ build_lib(
     ${libcore}
     ${libnetwork}
     ${libinternet}
+    ${libpoint-to-point}
     ${libroce}
   TEST_SOURCES
     test/mrc-header-test-suite.cc

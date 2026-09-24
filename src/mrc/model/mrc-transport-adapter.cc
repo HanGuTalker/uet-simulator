@@ -315,6 +315,46 @@ MrcTransportAdapter::GetConnectionError(uint32_t connectionId) const
     return connection == m_connections.end() ? MrcQpError::NONE : connection->second.error;
 }
 
+uint16_t
+MrcTransportAdapter::SendEvProbe(uint32_t endpointId, uint32_t pathId)
+{
+    return SendEndpointRequest(endpointId, MrcEndpointOperation::EV_PROBE, 0, pathId);
+}
+
+uint16_t
+MrcTransportAdapter::SendPortStatusUpdate(uint32_t endpointId,
+                                          uint32_t portStatusMask,
+                                          uint32_t pathId)
+{
+    return SendEndpointRequest(endpointId,
+                               MrcEndpointOperation::PORT_STATUS_UPDATE,
+                               portStatusMask,
+                               pathId);
+}
+
+bool
+MrcTransportAdapter::IsPathReachable(uint32_t endpointId, uint32_t pathId) const
+{
+    const uint64_t key = (static_cast<uint64_t>(endpointId) << 32) | pathId;
+    const auto path = m_endpointPaths.find(key);
+    return path != m_endpointPaths.end() && path->second.reachable;
+}
+
+Time
+MrcTransportAdapter::GetPathRtt(uint32_t endpointId, uint32_t pathId) const
+{
+    const uint64_t key = (static_cast<uint64_t>(endpointId) << 32) | pathId;
+    const auto path = m_endpointPaths.find(key);
+    return path == m_endpointPaths.end() ? Seconds(0) : path->second.rtt;
+}
+
+uint32_t
+MrcTransportAdapter::GetPeerPortStatusMask(uint32_t endpointId) const
+{
+    const auto status = m_peerPortStatusMasks.find(endpointId);
+    return status == m_peerPortStatusMasks.end() ? 0 : status->second;
+}
+
 void
 MrcTransportAdapter::TryTransmit(uint32_t connectionId)
 {
@@ -683,6 +723,51 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
                                 congestionExperienced,
                                 true,
                                 probe.GetProbeId());
+        }
+        else if (opcode == MrcOpcode::ENDPOINT_REQUEST)
+        {
+            MrcErthHeader request;
+            if (bth.GetDestinationQp() != 2 || packet->RemoveHeader(request) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            if (request.GetOperation() == MrcEndpointOperation::PORT_STATUS_UPDATE)
+            {
+                m_peerPortStatusMasks[tag.GetSourceEndpointId()] = request.GetPortStatusMask();
+            }
+            SendEndpointResponse(tag,
+                                 static_cast<uint16_t>(bth.GetPacketSequence()),
+                                 request.GetOperation(),
+                                 request.GetTimestamp());
+        }
+        else if (opcode == MrcOpcode::ENDPOINT_RESPONSE)
+        {
+            MrcEethHeader response;
+            if (bth.GetDestinationQp() != 2 || packet->RemoveHeader(response) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            const uint16_t requestId = static_cast<uint16_t>(bth.GetPacketSequence());
+            const uint64_t requestKey =
+                (static_cast<uint64_t>(tag.GetSourceEndpointId()) << 16) | requestId;
+            const auto request = m_endpointRequests.find(requestKey);
+            if (request == m_endpointRequests.end() ||
+                request->second.operation != response.GetOperation())
+            {
+                continue;
+            }
+            if (response.GetOperation() == MrcEndpointOperation::EV_PROBE)
+            {
+                const uint64_t pathKey =
+                    (static_cast<uint64_t>(request->second.endpointId) << 32) |
+                    request->second.pathId;
+                auto& path = m_endpointPaths[pathKey];
+                path.reachable = true;
+                path.rtt = Simulator::Now() - request->second.sent;
+            }
+            m_endpointRequests.erase(request);
         }
     }
 }
@@ -1053,6 +1138,67 @@ MrcTransportAdapter::TransitionConnectionToError(uint32_t connectionId, MrcQpErr
     }
 }
 
+uint16_t
+MrcTransportAdapter::SendEndpointRequest(uint32_t endpointId,
+                                         MrcEndpointOperation operation,
+                                         uint32_t portStatusMask,
+                                         uint32_t pathId)
+{
+    if (!m_receiveSocket || !m_peers.contains(endpointId) || m_pathSockets.empty())
+    {
+        return 0;
+    }
+    uint16_t requestId = m_nextEndpointRequestId++;
+    if (requestId == 0)
+    {
+        requestId = m_nextEndpointRequestId++;
+    }
+    Ptr<Packet> packet = Create<Packet>();
+    MrcErthHeader request;
+    request.SetOperation(operation);
+    request.SetPortStatusMask(portStatusMask);
+    request.SetTimestamp(static_cast<uint16_t>((Simulator::Now().GetNanoSeconds() / 128) & 0xffff));
+    packet->AddHeader(request);
+    RoceBthHeader bth;
+    bth.SetOpcode(static_cast<RoceOpcode>(MrcOpcode::ENDPOINT_REQUEST));
+    bth.SetDestinationQp(2);
+    bth.SetPacketSequence(requestId);
+    packet->AddHeader(bth);
+    RoceSimulationTag tag;
+    tag.SetSourceEndpointId(m_config.endpointId);
+    tag.SetDestinationEndpointId(endpointId);
+    const uint64_t key = (static_cast<uint64_t>(endpointId) << 16) | requestId;
+    m_endpointRequests[key] = {endpointId, pathId, operation, Simulator::Now()};
+    if (!SendWirePacket(packet, tag, 0, requestId, pathId))
+    {
+        m_endpointRequests.erase(key);
+        return 0;
+    }
+    return requestId;
+}
+
+void
+MrcTransportAdapter::SendEndpointResponse(const RoceSimulationTag& received,
+                                          uint16_t requestId,
+                                          MrcEndpointOperation operation,
+                                          uint16_t timestamp)
+{
+    Ptr<Packet> packet = Create<Packet>();
+    MrcEethHeader response;
+    response.SetOperation(operation);
+    response.SetTimestamp(timestamp);
+    packet->AddHeader(response);
+    RoceBthHeader bth;
+    bth.SetOpcode(static_cast<RoceOpcode>(MrcOpcode::ENDPOINT_RESPONSE));
+    bth.SetDestinationQp(2);
+    bth.SetPacketSequence(requestId);
+    packet->AddHeader(bth);
+    RoceSimulationTag tag;
+    tag.SetSourceEndpointId(m_config.endpointId);
+    tag.SetDestinationEndpointId(received.GetSourceEndpointId());
+    SendWirePacket(packet, tag, 0, requestId, received.GetPathId());
+}
+
 void
 MrcTransportAdapter::SendReliabilityProbe(uint32_t connectionId, uint32_t pathId)
 {
@@ -1133,6 +1279,9 @@ MrcTransportAdapter::DoDispose()
     }
     m_connections.clear();
     m_receivers.clear();
+    m_endpointRequests.clear();
+    m_endpointPaths.clear();
+    m_peerPortStatusMasks.clear();
     m_peers.clear();
     for (auto& socket : m_pathSockets)
     {

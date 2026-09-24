@@ -94,4 +94,5 @@ The MRC module registers a comparison subset with the MRC 1.0 Write and Write-wi
 layouts, packet spraying, out-of-order direct placement, ordered completion, independent semantic
 ACK and Reliability SACK/NACK processing, reliability probes, selective recovery, endpoint
 trimming recovery, retry-limit/non-retriable QP error transitions and SACK-clocked NSCC. Its
-implemented and deferred functions are documented in `docs/transport/mrc-model.md`.
+connectionless Endpoint Operations provide EV Probe RTT/reachability and Port Status Update state.
+Its implemented and deferred functions are documented in `docs/transport/mrc-model.md`.

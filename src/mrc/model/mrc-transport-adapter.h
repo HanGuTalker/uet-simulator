@@ -58,6 +58,13 @@ class MrcTransportAdapter : public AiTransportEndpoint
     AiTransportCounters GetCounters() const override;
     bool IsConnectionInError(uint32_t connectionId) const;
     MrcQpError GetConnectionError(uint32_t connectionId) const;
+    uint16_t SendEvProbe(uint32_t endpointId, uint32_t pathId = 0);
+    uint16_t SendPortStatusUpdate(uint32_t endpointId,
+                                  uint32_t portStatusMask,
+                                  uint32_t pathId = 0);
+    bool IsPathReachable(uint32_t endpointId, uint32_t pathId) const;
+    Time GetPathRtt(uint32_t endpointId, uint32_t pathId) const;
+    uint32_t GetPeerPortStatusMask(uint32_t endpointId) const;
 
   private:
     struct Peer
@@ -141,6 +148,20 @@ class MrcTransportAdapter : public AiTransportEndpoint
         std::unordered_map<uint16_t, ReceivedMessage> messages;
     };
 
+    struct EndpointRequestState
+    {
+        uint32_t endpointId{0};
+        uint32_t pathId{0};
+        MrcEndpointOperation operation{MrcEndpointOperation::EV_PROBE};
+        Time sent{Seconds(0)};
+    };
+
+    struct EndpointPathState
+    {
+        bool reachable{false};
+        Time rtt{Seconds(0)};
+    };
+
     void DoDispose() override;
     void Receive(Ptr<Socket> socket);
     void TryTransmit(uint32_t connectionId);
@@ -166,6 +187,14 @@ class MrcTransportAdapter : public AiTransportEndpoint
                              uint16_t timestamp,
                              MrcNackReason reason);
     void SendReliabilityProbe(uint32_t connectionId, uint32_t pathId);
+    uint16_t SendEndpointRequest(uint32_t endpointId,
+                                 MrcEndpointOperation operation,
+                                 uint32_t portStatusMask,
+                                 uint32_t pathId);
+    void SendEndpointResponse(const RoceSimulationTag& received,
+                              uint16_t requestId,
+                              MrcEndpointOperation operation,
+                              uint16_t timestamp);
     void ProcessAck(uint32_t connectionId, uint32_t cumulativeAck);
     void ProcessSack(uint32_t connectionId,
                      const MrcSethHeader& sack,
@@ -189,9 +218,13 @@ class MrcTransportAdapter : public AiTransportEndpoint
     uint32_t m_maxWriteImmediateInflight{64};
     uint32_t m_testDropDataSequenceOnce{0};
     bool m_testDropConsumed{false};
+    uint16_t m_nextEndpointRequestId{1};
     std::unordered_map<uint32_t, Peer> m_peers;
     std::unordered_map<uint32_t, ConnectionState> m_connections;
     std::unordered_map<uint64_t, ReceiverState> m_receivers;
+    std::unordered_map<uint64_t, EndpointRequestState> m_endpointRequests;
+    std::unordered_map<uint64_t, EndpointPathState> m_endpointPaths;
+    std::unordered_map<uint32_t, uint32_t> m_peerPortStatusMasks;
     AiTransportCounters m_counters;
 };
 

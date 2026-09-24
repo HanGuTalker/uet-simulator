@@ -41,6 +41,12 @@ enum class MrcNackReason : uint8_t
     UNEXPECTED_EVENT = 0x19,
 };
 
+enum class MrcEndpointOperation : uint8_t
+{
+    PORT_STATUS_UPDATE = 0,
+    EV_PROBE = 1,
+};
+
 /** Four-byte MRC Message Extended Transport Header. */
 class MrcMethHeader : public Header
 {
@@ -255,6 +261,56 @@ class MrcPethHeader : public Header
     uint16_t m_probeId{0};
     uint16_t m_sourcePdcId{0};
     uint16_t m_destinationPdcId{0};
+    uint16_t m_timestamp{0};
+};
+
+/** Sixteen-byte MRC Endpoint Request header. */
+class MrcErthHeader : public Header
+{
+  public:
+    static constexpr uint32_t SERIALIZED_SIZE = 16;
+
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
+
+    void SetOperation(MrcEndpointOperation value);
+    MrcEndpointOperation GetOperation() const;
+    void SetPortStatusMask(uint32_t value);
+    uint32_t GetPortStatusMask() const;
+    void SetTimestamp(uint16_t value);
+    uint16_t GetTimestamp() const;
+
+  private:
+    MrcEndpointOperation m_operation{MrcEndpointOperation::PORT_STATUS_UPDATE};
+    uint8_t m_vendorInfo{0};
+    uint32_t m_portStatusMask{0};
+    uint16_t m_timestamp{0};
+};
+
+/** Thirty-six-byte MRC Endpoint Response header. */
+class MrcEethHeader : public Header
+{
+  public:
+    static constexpr uint32_t SERIALIZED_SIZE = 36;
+
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
+
+    void SetOperation(MrcEndpointOperation value);
+    MrcEndpointOperation GetOperation() const;
+    void SetTimestamp(uint16_t value);
+    uint16_t GetTimestamp() const;
+
+  private:
+    MrcEndpointOperation m_operation{MrcEndpointOperation::PORT_STATUS_UPDATE};
     uint16_t m_timestamp{0};
 };
 

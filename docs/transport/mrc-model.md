@@ -5,7 +5,8 @@
 The MRC adapter is available as a functional comparison subset. It implements the standard Write
 and Write-with-Immediate data paths, packet spreading, out-of-order receive placement, packet
 trimming, the MRC reliability control path and SACK-clocked NSCC. It is not a full MRC endpoint
-because endpoint operations and the complete verbs/resource model remain deferred.
+because negotiated discovery, the full endpoint-visibility state machine and the complete
+verbs/resource model remain deferred.
 
 ## Normative basis
 
@@ -50,6 +51,11 @@ MRC-specific headers and state remain in the `mrc` module.
 - DSCP-9 trimmed-packet recognition before payload parsing, a common `PacketTrimmed` trace,
   Reliability NACK with reason `TRIMMED`, and sender fast retransmission on a different path. The
   shared switched-fabric trim queue preserves the headers needed to identify the affected PSN.
+- Connectionless Endpoint Operations using the 16-byte ERTH and 36-byte EETH layouts, reserved
+  destination QP `0x2`, and a request-private identifier in BTH PSN[15:0]. EV Probe responses
+  update per-peer/path reachability and RTT, while Port Status Update requests publish and retain
+  the peer's 32-bit reachable-port mask. These best-effort exchanges consume no QP PSNs and are
+  not retransmitted.
 - Per-QP, sender-side, SACK-clocked NSCC. Reflected 128 ns timestamps provide RTT samples, SETH `m`
   carries ECN feedback, and the controller applies fair additive increase, bounded multiplicative
   decrease and a one-nominal-packet minimum window.
@@ -61,8 +67,10 @@ a simulation mapping and is not presented as a verbs API.
 
 ## Deferred MRC functions
 
-- Endpoint discovery request/response and negotiated connection parameters.
-- Endpoint visibility, event delivery and port/path-health state machines.
+- Negotiated connection parameters and controller-driven endpoint discovery.
+- Timeout-driven EV failure detection, the complete EV recovery state machine, Structured EV and
+  SRv6 entropy formats. The current endpoint response reflects timestamps without service-time
+  compensation.
 - Memory registration/protection enforcement and complete verbs queue semantics.
 - Full verbs-driven QP lifecycle, work-completion syndromes and the remaining RC memory/protection
   error paths.
@@ -91,5 +99,8 @@ regression suite:
 - four-node 1 MiB Incast with a 32 KiB trim queue: 3/3 completed while 25 trimmed packets generated
   25 `TRIMMED` NACKs and 25 fast retransmissions, with zero timeout and zero queue drop. Aggregate
   goodput was 58.077 Gbit/s and mean latency was 152.310 us.
+- two-node 800 Gbit/s Endpoint Operations exchange: EV Probe request/response marked the selected
+  path reachable and produced a positive RTT sample, while Port Status Update reflected a `0xa5`
+  port mask into peer state without consuming connection PSNs.
 
 These runs are functional smoke checks. They are not tuned performance comparisons.
