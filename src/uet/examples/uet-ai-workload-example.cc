@@ -37,6 +37,7 @@ class AiWorkload
              uint32_t messages,
              uint32_t payloadBytes,
              const std::string& transportName,
+             const std::string& operationName,
              const std::string& pattern,
              bool ringInterleaved,
              const std::string& fabricType,
@@ -69,6 +70,11 @@ class AiWorkload
         m_messagesPerPair = messages;
         m_payloadBytes = payloadBytes;
         m_transportName = transportName;
+        m_operationName = operationName;
+        m_operation = operationName == "send"    ? AiTransportOperation::SEND
+                      : operationName == "write" ? AiTransportOperation::WRITE
+                      : operationName == "read"  ? AiTransportOperation::READ
+                                                 : AiTransportOperation::MESSAGE;
         m_pattern = pattern;
         m_ringInterleaved = ringInterleaved;
         m_fabricType = fabricType;
@@ -637,7 +643,7 @@ class AiWorkload
         request.remoteEndpointId = target;
         request.connectionId = connectionId;
         request.messageId = messageId;
-        request.operation = AiTransportOperation::MESSAGE;
+        request.operation = m_operation;
         request.reliability = AiTransportReliability::RELIABLE_UNORDERED;
         request.payload = Create<Packet>(payloadBytes);
         return m_endpoints[source]->Submit(request);
@@ -804,7 +810,10 @@ class AiWorkload
             return;
         }
         auto found = m_records.find(messageId);
-        if (found == m_records.end() || found->second.target != receiver || found->second.completed)
+        if (found == m_records.end() ||
+            (m_operation == AiTransportOperation::READ ? found->second.source
+                                                       : found->second.target) != receiver ||
+            found->second.completed)
         {
             return;
         }
@@ -1046,16 +1055,17 @@ class AiWorkload
             }
         }
 
-        messages << "protocol,pattern,node_count,group_id,message_id,source,target,bytes,scheduled_"
+        messages << "protocol,operation,pattern,node_count,group_id,message_id,source,target,bytes,"
+                    "scheduled_"
                     "ns,submitted,"
                     "submitted_ns,completed,completed_ns,latency_ns\n";
         for (const auto& [id, record] : m_records)
         {
             const auto group = m_messageGroups.find(id);
             const uint32_t groupId = group == m_messageGroups.end() ? 0 : group->second;
-            messages << m_transportName << ',' << m_pattern << ',' << m_nodeCount << ',' << groupId
-                     << ',' << id << ',' << record.source << ',' << record.target << ','
-                     << record.bytes << ',' << record.scheduledNs << ','
+            messages << m_transportName << ',' << m_operationName << ',' << m_pattern << ','
+                     << m_nodeCount << ',' << groupId << ',' << id << ',' << record.source << ','
+                     << record.target << ',' << record.bytes << ',' << record.scheduledNs << ','
                      << (record.submitted ? 1 : 0) << ',' << record.submittedNs << ','
                      << (record.completed ? 1 : 0) << ',' << record.completedNs << ','
                      << record.latencyNs << '\n';
@@ -1076,7 +1086,8 @@ class AiWorkload
         }
 
         const std::string header =
-            "protocol,pattern,fabric,link_rate,link_rate_bps,link_delay_ns,queue_packets,node_"
+            "protocol,operation,pattern,fabric,link_rate,link_rate_bps,link_delay_ns,queue_packets,"
+            "node_"
             "count,"
             "messages_per_pair,payload_bytes,reuse_pdc,warmup_bytes,warmups_attempted,"
             "warmups_submitted,warmups_completed,measurement_start_us,start_gap_ns,background_"
@@ -1094,13 +1105,13 @@ class AiWorkload
             "max_latency_ns,retransmissions,timeouts,nacks,ecn_marks,trimmed_packets,sack_packets,"
             "fast_retransmissions,rtt_probes,slow_path_signals,tx_datagrams,"
             "rx_datagrams,mtu_drops,crc_drops,device_queue_drops\n";
-        summaries << header << m_transportName << ',' << m_pattern << ',' << m_fabricType << ','
-                  << m_linkRate << ',' << m_linkRateBps << ',' << m_linkDelayNs << ','
-                  << m_queuePackets << ',' << m_nodeCount << ',' << m_messagesPerPair << ','
-                  << m_payloadBytes << ',' << (m_reusePdc ? 1 : 0) << ',' << m_warmupBytes << ','
-                  << m_warmupsAttempted << ',' << m_warmupsSubmitted << ',' << m_warmupsCompleted
-                  << ',' << m_measurementStartUs << ',' << m_startGapNs << ','
-                  << m_backgroundStartOffsetNs << ',' << m_nsccBaseRttNs << ','
+        summaries << header << m_transportName << ',' << m_operationName << ',' << m_pattern << ','
+                  << m_fabricType << ',' << m_linkRate << ',' << m_linkRateBps << ','
+                  << m_linkDelayNs << ',' << m_queuePackets << ',' << m_nodeCount << ','
+                  << m_messagesPerPair << ',' << m_payloadBytes << ',' << (m_reusePdc ? 1 : 0)
+                  << ',' << m_warmupBytes << ',' << m_warmupsAttempted << ',' << m_warmupsSubmitted
+                  << ',' << m_warmupsCompleted << ',' << m_measurementStartUs << ',' << m_startGapNs
+                  << ',' << m_backgroundStartOffsetNs << ',' << m_nsccBaseRttNs << ','
                   << m_nsccTargetQueueDelayNs << ',' << m_nsccInitialWindowBytes << ','
                   << m_nsccRequestedInitialWindowBytes << ',' << (m_autoScaleInitialWindow ? 1 : 0)
                   << ',' << MeanMeasurementStartCwnd() << ',' << (m_enableEcn ? 1 : 0) << ','
@@ -1122,8 +1133,9 @@ class AiWorkload
                   << ',' << m_deviceQueueDrops << '\n';
 
         json << std::fixed << std::setprecision(3) << "{\n"
-             << "  \"schema_version\": 3,\n"
+             << "  \"schema_version\": 4,\n"
              << "  \"protocol\": \"" << m_transportName << "\",\n"
+             << "  \"operation\": \"" << m_operationName << "\",\n"
              << "  \"pattern\": \"" << m_pattern << "\",\n"
              << "  \"fabric\": \"" << m_fabricType << "\",\n"
              << "  \"link_rate\": \"" << m_linkRate << "\",\n"
@@ -1226,6 +1238,8 @@ class AiWorkload
     uint32_t m_messagesPerPair{0};
     uint32_t m_payloadBytes{0};
     std::string m_transportName{"uec"};
+    std::string m_operationName{"message"};
+    AiTransportOperation m_operation{AiTransportOperation::MESSAGE};
     std::string m_pattern;
     std::string m_fabricType;
     std::string m_linkRate;
@@ -1319,6 +1333,7 @@ main(int argc, char* argv[])
     uint32_t messages = 4;
     uint32_t payloadBytes = 4096;
     std::string transport = "uec";
+    std::string operation = "message";
     std::string pattern = "incast";
     bool ringInterleaved = false;
     std::string fabric = "switched";
@@ -1352,6 +1367,7 @@ main(int argc, char* argv[])
                      "Bytes per message, or tensor bytes per AllReduce rank",
                      payloadBytes);
     command.AddValue("transport", "uec, veroce, mrc, falcon, metaroce, or rocev2", transport);
+    command.AddValue("operation", "message, send, write, or read", operation);
     command.AddValue("pattern", "single, incast, all-to-all, or ring-allreduce", pattern);
     command.AddValue("ringInterleaved",
                      "Alternate first-half and second-half ranks in the AllReduce ring",
@@ -1407,6 +1423,10 @@ main(int argc, char* argv[])
     command.Parse(argc, argv);
     if (nodes < 2 || nodes > 250 || messages == 0 ||
         ParseAiTransportProtocol(transport) == AiTransportProtocol::UNKNOWN ||
+        (operation != "message" && operation != "send" && operation != "write" &&
+         operation != "read") ||
+        (operation == "read" &&
+         ParseAiTransportProtocol(transport) != AiTransportProtocol::VEROCE) ||
         (pattern != "single" && pattern != "incast" && pattern != "all-to-all" &&
          pattern != "ring-allreduce") ||
         (pattern == "ring-allreduce" && payloadBytes % nodes != 0) ||
@@ -1435,6 +1455,7 @@ main(int argc, char* argv[])
                         messages,
                         payloadBytes,
                         transport,
+                        operation,
                         pattern,
                         ringInterleaved,
                         fabric,

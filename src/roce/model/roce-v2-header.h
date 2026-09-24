@@ -26,6 +26,11 @@ enum class RoceOpcode : uint8_t
     RC_WRITE_MIDDLE = 0x07,
     RC_WRITE_LAST = 0x08,
     RC_WRITE_ONLY = 0x0a,
+    RC_READ_REQUEST = 0x0c,
+    RC_READ_RESPONSE_FIRST = 0x0d,
+    RC_READ_RESPONSE_MIDDLE = 0x0e,
+    RC_READ_RESPONSE_LAST = 0x0f,
+    RC_READ_RESPONSE_ONLY = 0x10,
     RC_ACK = 0x11,
     RC_SACK = 0x18,
     RC_ACK_RSP = 0x19,
@@ -173,6 +178,8 @@ bool IsRoceDataOpcode(RoceOpcode opcode);
 bool IsRoceFirstOpcode(RoceOpcode opcode);
 bool IsRoceLastOpcode(RoceOpcode opcode);
 bool IsRoceWriteOpcode(RoceOpcode opcode);
+bool IsRoceReadRequestOpcode(RoceOpcode opcode);
+bool IsRoceReadResponseOpcode(RoceOpcode opcode);
 
 } // namespace ns3
 

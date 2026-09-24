@@ -49,6 +49,9 @@ enum class AiTransportOperation : uint8_t
     WRITE = 1,
     WRITE_IMMEDIATE = 2,
     SEND = 3,
+    READ = 4,
+    ATOMIC_COMPARE_SWAP = 5,
+    ATOMIC_FETCH_ADD = 6,
 };
 
 /** Common endpoint configuration supplied by an experiment. */

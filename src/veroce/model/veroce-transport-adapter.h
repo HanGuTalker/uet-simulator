@@ -25,7 +25,7 @@ namespace ns3
 
 class Socket;
 
-/** veRoCE P2 data-plane adapter with out-of-order DDP, SACK and path-wise FCC. */
+/** veRoCE P2 data plane plus P3 Read, with out-of-order DDP, SACK and path-wise FCC. */
 class VeRoceTransportAdapter : public AiTransportEndpoint
 {
   public:
@@ -84,6 +84,7 @@ class VeRoceTransportAdapter : public AiTransportEndpoint
         uint32_t wireBytes{0};
         uint32_t pathId{0};
         uint32_t retransmissions{0};
+        bool readRequest{false};
         bool sent{false};
         EventId timeout;
     };
@@ -92,6 +93,8 @@ class VeRoceTransportAdapter : public AiTransportEndpoint
     {
         uint32_t bytes{0};
         uint32_t remainingPackets{0};
+        bool read{false};
+        bool responseComplete{false};
     };
 
     struct ConnectionState
@@ -132,6 +135,33 @@ class VeRoceTransportAdapter : public AiTransportEndpoint
         std::map<uint32_t, ReceivedMessage> messages;
     };
 
+    struct ResponsePendingPacket
+    {
+        Ptr<Packet> payload;
+        RoceSimulationTag tag;
+        RoceOpcode opcode{RoceOpcode::RC_READ_RESPONSE_ONLY};
+        uint32_t sequence{0};
+        uint32_t responseMessageSequence{0};
+        uint32_t requestMessageSequence{0};
+        uint32_t packetOrder{0};
+        uint32_t pathId{0};
+        uint32_t retransmissions{0};
+        EventId timeout;
+    };
+
+    struct ResponseState
+    {
+        uint32_t remoteEndpointId{0};
+        uint32_t nextSequence{1};
+        uint32_t nextMessageSequence{1};
+        uint32_t nextPath{0};
+        uint32_t retransmitFrontier{0};
+        Time retransmitFrontierUpdated{Seconds(0)};
+        Time retransmissionTimeout{MicroSeconds(50)};
+        std::vector<Time> nextSend;
+        std::map<uint32_t, ResponsePendingPacket> pending;
+    };
+
     void DoDispose() override;
     void Receive(Ptr<Socket> socket);
     void TryTransmit(uint32_t connectionId);
@@ -147,10 +177,22 @@ class VeRoceTransportAdapter : public AiTransportEndpoint
     void SendCnp(const RoceSimulationTag& received);
     void SendPacketDropNak(const RoceSimulationTag& received,
                            uint32_t packetSequence,
-                           uint32_t messageSequence);
+                           uint32_t messageSequence,
+                           bool responseSpace = false);
     void ProcessAck(uint32_t connectionId, uint32_t acknowledgedPsn);
     void ProcessSack(uint32_t connectionId, uint32_t acknowledgedPsn, const VeRoceSackHeader& sack);
     void ProcessPacketDropNak(uint32_t connectionId, uint32_t packetSequence);
+    void GenerateReadResponse(const RoceSimulationTag& request, uint32_t requestMessageSequence);
+    void TransmitReadResponse(uint64_t responseKey, uint32_t sequence, bool retransmission);
+    void HandleResponseTimeout(uint64_t responseKey, uint32_t sequence);
+    void ProcessResponseAck(uint64_t responseKey, uint32_t acknowledgedPsn);
+    void ProcessResponseSack(uint64_t responseKey,
+                             uint32_t acknowledgedPsn,
+                             const VeRoceSackHeader& sack);
+    void ProcessResponsePacketDropNak(uint64_t responseKey, uint32_t packetSequence);
+    void SendResponseAcknowledgment(const RoceSimulationTag& received,
+                                    const ReceiverState& state,
+                                    bool selective);
     void HandleTimeout(uint32_t connectionId, uint32_t sequence);
     void ProcessCnp(uint32_t connectionId, uint32_t pathId);
     void RecoverPathRate(uint32_t connectionId, uint32_t pathId);
@@ -195,6 +237,8 @@ class VeRoceTransportAdapter : public AiTransportEndpoint
     std::unordered_map<uint32_t, Peer> m_peers;
     std::unordered_map<uint32_t, ConnectionState> m_connections;
     std::unordered_map<uint64_t, ReceiverState> m_receivers;
+    std::unordered_map<uint64_t, ReceiverState> m_responseReceivers;
+    std::unordered_map<uint64_t, ResponseState> m_responseConnections;
     std::unordered_map<uint64_t, Time> m_lastCnp;
     AiTransportCounters m_counters;
 };

@@ -221,7 +221,8 @@ VeRoceTransportAdapter::Submit(const AiTransportRequest& request)
         request.reliability != AiTransportReliability::RELIABLE_UNORDERED ||
         (request.operation != AiTransportOperation::MESSAGE &&
          request.operation != AiTransportOperation::SEND &&
-         request.operation != AiTransportOperation::WRITE))
+         request.operation != AiTransportOperation::WRITE &&
+         request.operation != AiTransportOperation::READ))
     {
         return false;
     }
@@ -231,29 +232,31 @@ VeRoceTransportAdapter::Submit(const AiTransportRequest& request)
         return false;
     }
     const uint32_t totalBytes = request.payload->GetSize();
+    const bool read = request.operation == AiTransportOperation::READ;
     const uint32_t fragments =
-        (totalBytes + m_config.payloadMtuBytes - 1) / m_config.payloadMtuBytes;
+        read ? 1 : (totalBytes + m_config.payloadMtuBytes - 1) / m_config.payloadMtuBytes;
     if (state.nextSequence + fragments > 0xffffff || state.nextMessageSequence > 0xffffff)
     {
         return false;
     }
     const uint32_t msn = state.nextMessageSequence++;
-    state.messages.emplace(request.messageId, MessageState{totalBytes, fragments});
+    state.messages.emplace(request.messageId, MessageState{totalBytes, fragments, read, false});
     uint32_t offset = 0;
     for (uint32_t fragment = 0; fragment < fragments; ++fragment)
     {
-        const uint32_t bytes = std::min(m_config.payloadMtuBytes, totalBytes - offset);
+        const uint32_t bytes = read ? 0 : std::min(m_config.payloadMtuBytes, totalBytes - offset);
         PendingPacket pending;
-        pending.payload = request.payload->CreateFragment(offset, bytes);
+        pending.payload = read ? Create<Packet>() : request.payload->CreateFragment(offset, bytes);
         pending.opcode = SelectOpcode(request.operation, fragment, fragments);
         pending.sequence = state.nextSequence++;
         pending.messageSequence = msn;
         pending.packetOrder = fragment;
         pending.payloadBytes = bytes;
+        pending.readRequest = read;
         const bool write = IsRoceWriteOpcode(pending.opcode);
         pending.wireBytes =
             bytes + RoceBthHeader::SERIALIZED_SIZE + VeRoceMsnHeader::SERIALIZED_SIZE +
-            (write ? RoceRethHeader::SERIALIZED_SIZE : VeRoceRqHeader::SERIALIZED_SIZE) +
+            ((write || read) ? RoceRethHeader::SERIALIZED_SIZE : VeRoceRqHeader::SERIALIZED_SIZE) +
             (IsRoceFirstOpcode(pending.opcode) ? 0 : VeRocePacketOffsetHeader::SERIALIZED_SIZE) +
             RoceInvariantCrcTrailer::SERIALIZED_SIZE;
         pending.tag.SetSourceEndpointId(m_config.endpointId);
@@ -353,6 +356,10 @@ VeRoceTransportAdapter::SelectOpcode(AiTransportOperation operation,
                                      uint32_t fragment,
                                      uint32_t fragments) const
 {
+    if (operation == AiTransportOperation::READ)
+    {
+        return RoceOpcode::RC_READ_REQUEST;
+    }
     // The protocol-neutral MESSAGE operation maps to RDMA Write for the P2 profile.
     const bool write = operation != AiTransportOperation::SEND;
     if (fragments == 1)
@@ -462,13 +469,14 @@ VeRoceTransportAdapter::TransmitSequence(uint32_t connectionId,
         poeth.SetPacketOrder(pending->second.packetOrder);
         packet->AddHeader(poeth);
     }
-    if (IsRoceWriteOpcode(pending->second.opcode))
+    if (IsRoceWriteOpcode(pending->second.opcode) || pending->second.readRequest)
     {
         RoceRethHeader reth;
         reth.SetVirtualAddress(pending->second.tag.GetMessageId() +
                                pending->second.packetOrder * m_config.payloadMtuBytes);
         reth.SetRemoteKey(connectionId);
-        reth.SetDmaLength(pending->second.payloadBytes);
+        reth.SetDmaLength(pending->second.readRequest ? pending->second.tag.GetTotalMessageBytes()
+                                                      : pending->second.payloadBytes);
         packet->AddHeader(reth);
     }
     else
@@ -588,6 +596,8 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
         const RoceOpcode opcode = bth.GetOpcode();
         if (IsRoceDataOpcode(opcode))
         {
+            const bool readRequest = IsRoceReadRequestOpcode(opcode);
+            const bool readResponse = IsRoceReadResponseOpcode(opcode);
             VeRoceMsnHeader msneth;
             if (packet->RemoveHeader(msneth) == 0)
             {
@@ -597,10 +607,22 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
             if (packetTrimmed)
             {
                 NotifyPacketTrimmed(wireImage, tag.GetConnectionId(), tag.GetPathId());
-                SendPacketDropNak(tag, bth.GetPacketSequence(), msneth.GetMessageSequence());
+                SendPacketDropNak(tag,
+                                  bth.GetPacketSequence(),
+                                  msneth.GetMessageSequence(),
+                                  readResponse);
                 continue;
             }
-            if (IsRoceWriteOpcode(opcode))
+            if (readResponse)
+            {
+                RoceAethHeader aeth;
+                if (packet->RemoveHeader(aeth) == 0)
+                {
+                    ++m_counters.integrityDrops;
+                    continue;
+                }
+            }
+            else if (IsRoceWriteOpcode(opcode) || readRequest)
             {
                 RoceRethHeader reth;
                 if (packet->RemoveHeader(reth) == 0)
@@ -630,7 +652,7 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
                 packetOrder = poeth.GetPacketOrder();
             }
             const uint64_t key = ReceiverKey(tag.GetSourceEndpointId(), tag.GetConnectionId());
-            auto& state = m_receivers[key];
+            auto& state = readResponse ? m_responseReceivers[key] : m_receivers[key];
             const uint32_t sequence = bth.GetPacketSequence();
             const uint32_t previousHighest = state.highestPsn;
             if (sequence > state.acknowledgedPsn + m_receiveBitmapLength)
@@ -645,13 +667,51 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
             }
             if (newPacket)
             {
-                NotifyPayloadRx(tag.GetSourceEndpointId(), tag.GetPayloadBytes());
-                CompleteReceivedMessage(tag,
-                                        msneth.GetMessageSequence(),
-                                        packetOrder,
-                                        IsRoceLastOpcode(opcode),
-                                        state);
-                if (previousHighest > sequence &&
+                if (readRequest)
+                {
+                    auto& message = state.messages[msneth.GetMessageSequence()];
+                    message.messageId = tag.GetMessageId();
+                    message.totalBytes = tag.GetTotalMessageBytes();
+                    message.submittedTimeNs = tag.GetSubmittedTimeNs();
+                    message.completed = true;
+                    while (true)
+                    {
+                        auto next = state.messages.find(state.acknowledgedMsn + 1);
+                        if (next == state.messages.end() || !next->second.completed)
+                        {
+                            break;
+                        }
+                        ++state.acknowledgedMsn;
+                        state.messages.erase(next);
+                    }
+                    GenerateReadResponse(tag, msneth.GetMessageSequence());
+                }
+                else
+                {
+                    NotifyPayloadRx(tag.GetSourceEndpointId(), tag.GetPayloadBytes());
+                    const bool completed = CompleteReceivedMessage(tag,
+                                                                   msneth.GetMessageSequence(),
+                                                                   packetOrder,
+                                                                   IsRoceLastOpcode(opcode),
+                                                                   state);
+                    if (readResponse && completed)
+                    {
+                        auto connection = m_connections.find(tag.GetConnectionId());
+                        if (connection != m_connections.end())
+                        {
+                            auto message = connection->second.messages.find(tag.GetMessageId());
+                            if (message != connection->second.messages.end())
+                            {
+                                message->second.responseComplete = true;
+                                if (message->second.remainingPackets == 0)
+                                {
+                                    connection->second.messages.erase(message);
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!readRequest && !readResponse && previousHighest > sequence &&
                     previousHighest - sequence >= m_slowPacketPsnThreshold)
                 {
                     SendSlowPathSignal(tag, sequence);
@@ -669,8 +729,15 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
             {
                 NotifyReorderDepth(tag.GetConnectionId(), oldDepth, state.reorderDepth);
             }
-            SendAcknowledgment(tag, state, state.reorderDepth > m_lazySackThreshold);
-            if (congestionExperienced)
+            if (readResponse)
+            {
+                SendResponseAcknowledgment(tag, state, state.reorderDepth > m_lazySackThreshold);
+            }
+            else
+            {
+                SendAcknowledgment(tag, state, state.reorderDepth > m_lazySackThreshold);
+            }
+            if (congestionExperienced && !readResponse)
             {
                 SendCnp(tag);
             }
@@ -701,6 +768,36 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
             else
             {
                 ProcessAck(tag.GetConnectionId(), bth.GetPacketSequence());
+            }
+        }
+        else if (opcode == RoceOpcode::RC_ACK_RSP || opcode == RoceOpcode::RC_SACK_RSP)
+        {
+            RoceAethHeader aeth;
+            VeRocePacketOffsetHeader poeth;
+            if (packet->RemoveHeader(aeth) == 0 || packet->RemoveHeader(poeth) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            const uint64_t responseKey =
+                ReceiverKey(tag.GetSourceEndpointId(), tag.GetConnectionId());
+            if (aeth.GetSyndrome() == RoceAethHeader::SEQUENCE_NAK_SYNDROME)
+            {
+                ProcessResponsePacketDropNak(responseKey, bth.GetPacketSequence());
+            }
+            else if (opcode == RoceOpcode::RC_SACK_RSP)
+            {
+                VeRoceSackHeader sack;
+                if (packet->RemoveHeader(sack) == 0)
+                {
+                    ++m_counters.integrityDrops;
+                    continue;
+                }
+                ProcessResponseSack(responseKey, bth.GetPacketSequence(), sack);
+            }
+            else
+            {
+                ProcessResponseAck(responseKey, bth.GetPacketSequence());
             }
         }
         else if (opcode == RoceOpcode::CNP)
@@ -832,6 +929,53 @@ VeRoceTransportAdapter::SendAcknowledgment(const RoceSimulationTag& received,
 }
 
 void
+VeRoceTransportAdapter::SendResponseAcknowledgment(const RoceSimulationTag& received,
+                                                   const ReceiverState& state,
+                                                   bool selective)
+{
+    Ptr<Packet> packet = Create<Packet>();
+    if (selective)
+    {
+        ++m_counters.selectiveAcknowledgments;
+        VeRoceSackHeader sack;
+        sack.SetBitmapStartingPsn(state.acknowledgedPsn);
+        const uint32_t span = std::min<uint32_t>(VeRoceSackHeader::MAX_BITMAP_BITS,
+                                                 state.highestPsn >= state.acknowledgedPsn
+                                                     ? state.highestPsn - state.acknowledgedPsn + 1
+                                                     : 1);
+        sack.SetBitmapValidLength(static_cast<uint8_t>(span));
+        sack.SetReceived(0);
+        for (uint32_t offset = 1; offset < span; ++offset)
+        {
+            sack.SetReceived(offset, state.receivedPsns.contains(state.acknowledgedPsn + offset));
+        }
+        packet->AddHeader(sack);
+    }
+    VeRocePacketOffsetHeader poeth;
+    poeth.SetPacketOrder(VeRocePacketOffsetHeader::UNAVAILABLE);
+    packet->AddHeader(poeth);
+    RoceAethHeader aeth;
+    aeth.SetSyndrome(RoceAethHeader::ACK_SYNDROME);
+    aeth.SetMessageSequence(state.acknowledgedMsn);
+    packet->AddHeader(aeth);
+    RoceBthHeader bth;
+    bth.SetOpcode(selective ? RoceOpcode::RC_SACK_RSP : RoceOpcode::RC_ACK_RSP);
+    bth.SetDestinationQp(received.GetConnectionId());
+    bth.SetPacketSequence(state.acknowledgedPsn);
+    packet->AddHeader(bth);
+    RoceSimulationTag response;
+    response.SetSourceEndpointId(m_config.endpointId);
+    response.SetDestinationEndpointId(received.GetSourceEndpointId());
+    response.SetConnectionId(received.GetConnectionId());
+    response.SetMessageId(received.GetMessageId());
+    SendWirePacket(packet,
+                   response,
+                   received.GetConnectionId(),
+                   state.acknowledgedPsn,
+                   received.GetPathId());
+}
+
+void
 VeRoceTransportAdapter::SendCnp(const RoceSimulationTag& received)
 {
     const uint64_t key =
@@ -861,7 +1005,8 @@ VeRoceTransportAdapter::SendCnp(const RoceSimulationTag& received)
 void
 VeRoceTransportAdapter::SendPacketDropNak(const RoceSimulationTag& received,
                                           uint32_t packetSequence,
-                                          uint32_t messageSequence)
+                                          uint32_t messageSequence,
+                                          bool responseSpace)
 {
     Ptr<Packet> packet = Create<Packet>();
     VeRocePacketOffsetHeader poeth;
@@ -872,7 +1017,7 @@ VeRoceTransportAdapter::SendPacketDropNak(const RoceSimulationTag& received,
     aeth.SetMessageSequence(messageSequence);
     packet->AddHeader(aeth);
     RoceBthHeader bth;
-    bth.SetOpcode(RoceOpcode::RC_ACK);
+    bth.SetOpcode(responseSpace ? RoceOpcode::RC_ACK_RSP : RoceOpcode::RC_ACK);
     bth.SetDestinationQp(received.GetConnectionId());
     bth.SetPacketSequence(packetSequence);
     packet->AddHeader(bth);
@@ -886,6 +1031,234 @@ VeRoceTransportAdapter::SendPacketDropNak(const RoceSimulationTag& received,
                    received.GetConnectionId(),
                    packetSequence,
                    received.GetPathId());
+}
+
+void
+VeRoceTransportAdapter::GenerateReadResponse(const RoceSimulationTag& request,
+                                             uint32_t requestMessageSequence)
+{
+    const uint64_t responseKey =
+        ReceiverKey(request.GetSourceEndpointId(), request.GetConnectionId());
+    auto [found, inserted] = m_responseConnections.try_emplace(responseKey);
+    auto& state = found->second;
+    if (inserted)
+    {
+        state.remoteEndpointId = request.GetSourceEndpointId();
+        state.nextSend.resize(m_pathCount, Simulator::Now());
+    }
+    const uint32_t totalBytes = request.GetTotalMessageBytes();
+    const uint32_t fragments =
+        (totalBytes + m_config.payloadMtuBytes - 1) / m_config.payloadMtuBytes;
+    if (fragments == 0 || state.nextSequence + fragments > 0xffffff ||
+        state.nextMessageSequence > 0xffffff)
+    {
+        return;
+    }
+    const uint32_t responseMsn = state.nextMessageSequence++;
+    uint32_t offset = 0;
+    const uint64_t pathRate = std::max<uint64_t>(1, m_config.lineRateBps / m_pathCount);
+    for (uint32_t fragment = 0; fragment < fragments; ++fragment)
+    {
+        const uint32_t bytes = std::min(m_config.payloadMtuBytes, totalBytes - offset);
+        ResponsePendingPacket pending;
+        pending.payload = Create<Packet>(bytes);
+        pending.opcode = fragments == 1
+                             ? RoceOpcode::RC_READ_RESPONSE_ONLY
+                             : (fragment == 0 ? RoceOpcode::RC_READ_RESPONSE_FIRST
+                                              : (fragment + 1 == fragments
+                                                     ? RoceOpcode::RC_READ_RESPONSE_LAST
+                                                     : RoceOpcode::RC_READ_RESPONSE_MIDDLE));
+        pending.sequence = state.nextSequence++;
+        pending.responseMessageSequence = responseMsn;
+        pending.requestMessageSequence = requestMessageSequence;
+        pending.packetOrder = fragment;
+        pending.pathId = state.nextPath++ % m_pathCount;
+        pending.tag.SetSourceEndpointId(m_config.endpointId);
+        pending.tag.SetDestinationEndpointId(request.GetSourceEndpointId());
+        pending.tag.SetConnectionId(request.GetConnectionId());
+        pending.tag.SetMessageId(request.GetMessageId());
+        pending.tag.SetPayloadBytes(bytes);
+        pending.tag.SetTotalMessageBytes(totalBytes);
+        pending.tag.SetSubmittedTimeNs(request.GetSubmittedTimeNs());
+        const uint32_t sequence = pending.sequence;
+        state.pending.emplace(sequence, std::move(pending));
+        const uint32_t wireBytes = bytes + RoceBthHeader::SERIALIZED_SIZE +
+                                   VeRoceMsnHeader::SERIALIZED_SIZE +
+                                   RoceAethHeader::SERIALIZED_SIZE +
+                                   (fragment == 0 ? 0 : VeRocePacketOffsetHeader::SERIALIZED_SIZE) +
+                                   RoceInvariantCrcTrailer::SERIALIZED_SIZE;
+        const Time sendAt =
+            std::max(Simulator::Now(), state.nextSend[state.pending.at(sequence).pathId]);
+        Simulator::Schedule(sendAt - Simulator::Now(),
+                            &VeRoceTransportAdapter::TransmitReadResponse,
+                            this,
+                            responseKey,
+                            sequence,
+                            false);
+        const uint64_t serializationNs = std::max<uint64_t>(
+            1,
+            (static_cast<uint64_t>(wireBytes) * 8ULL * 1000000000ULL + pathRate - 1) / pathRate);
+        state.nextSend[state.pending.at(sequence).pathId] = sendAt + NanoSeconds(serializationNs);
+        offset += bytes;
+    }
+}
+
+void
+VeRoceTransportAdapter::TransmitReadResponse(uint64_t responseKey,
+                                             uint32_t sequence,
+                                             bool retransmission)
+{
+    auto response = m_responseConnections.find(responseKey);
+    if (response == m_responseConnections.end())
+    {
+        return;
+    }
+    auto pending = response->second.pending.find(sequence);
+    if (pending == response->second.pending.end())
+    {
+        return;
+    }
+    if (retransmission)
+    {
+        pending->second.pathId = response->second.nextPath++ % m_pathCount;
+    }
+    Ptr<Packet> packet = pending->second.payload->Copy();
+    if (!IsRoceFirstOpcode(pending->second.opcode))
+    {
+        VeRocePacketOffsetHeader poeth;
+        poeth.SetPacketOrder(pending->second.packetOrder);
+        packet->AddHeader(poeth);
+    }
+    RoceAethHeader aeth;
+    aeth.SetSyndrome(RoceAethHeader::ACK_SYNDROME);
+    aeth.SetMessageSequence(pending->second.requestMessageSequence);
+    packet->AddHeader(aeth);
+    VeRoceMsnHeader msneth;
+    msneth.SetMessageSequence(pending->second.requestMessageSequence);
+    packet->AddHeader(msneth);
+    RoceBthHeader bth;
+    bth.SetOpcode(pending->second.opcode);
+    bth.SetDestinationQp(pending->second.tag.GetConnectionId());
+    bth.SetPacketSequence(sequence);
+    bth.SetAckRequest(true);
+    bth.SetRetransmission(retransmission);
+    packet->AddHeader(bth);
+    if (retransmission)
+    {
+        NotifyRetransmission(pending->second.tag.GetConnectionId(), sequence);
+    }
+    SendWirePacket(packet,
+                   pending->second.tag,
+                   pending->second.tag.GetConnectionId(),
+                   sequence,
+                   pending->second.pathId);
+    pending->second.timeout.Cancel();
+    const Time timeout = response->second.retransmissionTimeout *
+                         (1ULL << std::min(pending->second.retransmissions, 6u));
+    pending->second.timeout = Simulator::Schedule(timeout,
+                                                  &VeRoceTransportAdapter::HandleResponseTimeout,
+                                                  this,
+                                                  responseKey,
+                                                  sequence);
+}
+
+void
+VeRoceTransportAdapter::HandleResponseTimeout(uint64_t responseKey, uint32_t sequence)
+{
+    auto response = m_responseConnections.find(responseKey);
+    if (response == m_responseConnections.end())
+    {
+        return;
+    }
+    auto pending = response->second.pending.find(sequence);
+    if (pending == response->second.pending.end() ||
+        pending->second.retransmissions >= m_config.maxRetransmissions)
+    {
+        return;
+    }
+    NotifyTimeout(pending->second.tag.GetConnectionId(), sequence);
+    ++pending->second.retransmissions;
+    TransmitReadResponse(responseKey, sequence, true);
+}
+
+void
+VeRoceTransportAdapter::ProcessResponseAck(uint64_t responseKey, uint32_t acknowledgedPsn)
+{
+    auto response = m_responseConnections.find(responseKey);
+    if (response == m_responseConnections.end())
+    {
+        return;
+    }
+    auto& state = response->second;
+    for (auto pending = state.pending.begin();
+         pending != state.pending.end() && pending->first <= acknowledgedPsn;)
+    {
+        pending->second.timeout.Cancel();
+        pending = state.pending.erase(pending);
+    }
+}
+
+void
+VeRoceTransportAdapter::ProcessResponseSack(uint64_t responseKey,
+                                            uint32_t acknowledgedPsn,
+                                            const VeRoceSackHeader& sack)
+{
+    ProcessResponseAck(responseKey, acknowledgedPsn);
+    auto response = m_responseConnections.find(responseKey);
+    if (response == m_responseConnections.end())
+    {
+        return;
+    }
+    auto& state = response->second;
+    if (state.retransmitFrontierUpdated.IsZero() ||
+        Simulator::Now() - state.retransmitFrontierUpdated >= state.retransmissionTimeout)
+    {
+        state.retransmitFrontier = acknowledgedPsn;
+    }
+    const uint32_t start = sack.GetBitmapStartingPsn();
+    const uint32_t length = sack.GetBitmapValidLength();
+    for (uint32_t offset = 0; offset < length; ++offset)
+    {
+        const uint32_t sequence = start + offset;
+        if (sequence <= acknowledgedPsn || sequence <= state.retransmitFrontier ||
+            sack.IsReceived(offset))
+        {
+            continue;
+        }
+        auto pending = state.pending.find(sequence);
+        if (pending != state.pending.end() &&
+            pending->second.retransmissions < m_config.maxRetransmissions)
+        {
+            ++pending->second.retransmissions;
+            ++m_counters.fastRetransmissions;
+            TransmitReadResponse(responseKey, sequence, true);
+        }
+    }
+    if (length > 0)
+    {
+        state.retransmitFrontier = std::max(state.retransmitFrontier, start + length - 1);
+        state.retransmitFrontierUpdated = Simulator::Now();
+    }
+}
+
+void
+VeRoceTransportAdapter::ProcessResponsePacketDropNak(uint64_t responseKey, uint32_t packetSequence)
+{
+    auto response = m_responseConnections.find(responseKey);
+    if (response == m_responseConnections.end())
+    {
+        return;
+    }
+    auto pending = response->second.pending.find(packetSequence);
+    if (pending == response->second.pending.end() ||
+        pending->second.retransmissions >= m_config.maxRetransmissions)
+    {
+        return;
+    }
+    NotifyNack(pending->second.tag.GetConnectionId(), packetSequence);
+    ++pending->second.retransmissions;
+    ++m_counters.fastRetransmissions;
+    TransmitReadResponse(responseKey, packetSequence, true);
 }
 
 void
@@ -912,7 +1285,8 @@ VeRoceTransportAdapter::ProcessAck(uint32_t connectionId, uint32_t acknowledgedP
         const uint64_t messageId = pending->second.tag.GetMessageId();
         auto message = state.messages.find(messageId);
         if (message != state.messages.end() && message->second.remainingPackets > 0 &&
-            --message->second.remainingPackets == 0)
+            --message->second.remainingPackets == 0 &&
+            (!message->second.read || message->second.responseComplete))
         {
             state.messages.erase(message);
         }
@@ -1211,8 +1585,19 @@ VeRoceTransportAdapter::DoDispose()
             pending.timeout.Cancel();
         }
     }
+    for (auto& [responseKey, state] : m_responseConnections)
+    {
+        (void)responseKey;
+        for (auto& [sequence, pending] : state.pending)
+        {
+            (void)sequence;
+            pending.timeout.Cancel();
+        }
+    }
     m_connections.clear();
     m_receivers.clear();
+    m_responseReceivers.clear();
+    m_responseConnections.clear();
     m_peers.clear();
     m_lastCnp.clear();
     for (auto& socket : m_pathSockets)

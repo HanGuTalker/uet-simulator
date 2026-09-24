@@ -57,6 +57,8 @@ trace events to the common trace surface. The adapter reports packet spraying an
 congestion control as unsupported because the frozen UEC sender still assigns `pathId=0`.
 
 The workload entry point accepts `--transport=uec`, `--transport=rocev2` and `--transport=veroce`.
+Its `--operation=message|send|write|read` switch selects the common verb; RDMA Read is currently
+accepted only by the veRoCE adapter and completes at the requesting endpoint.
 Names for MRC, Falcon and MetaRoCE are parsed now. Until the corresponding adapter is registered,
 selecting one fails explicitly and never falls back to another protocol.
 
@@ -83,7 +85,8 @@ A two-node, one-message UEC smoke run completed one of one messages and emitted 
 registered yet. The RoCEv2 module is registered as the conventional RC/DCQCN baseline; its exact
 scope and limitations are documented in `docs/transport/rocev2-model.md`.
 
-The veRoCE module registers a P2-oriented data-plane adapter on UDP port 4794. It implements actual
-veRoCE extension-header serialization, out-of-order DDP accounting, Lazy SACK/selective recovery,
-UDP source-port packet spreading and path-wise FCC. Its supported and deferred protocol functions
-are documented in `docs/transport/veroce-model.md`.
+The veRoCE module registers a P2-oriented data-plane adapter with a P3 Read path on UDP port 4794.
+It implements actual veRoCE extension-header serialization, out-of-order DDP accounting, Lazy
+SACK/selective recovery, UDP source-port packet spreading, path-wise FCC and independent reliable
+Read response state. Its supported and deferred protocol functions are documented in
+`docs/transport/veroce-model.md`.

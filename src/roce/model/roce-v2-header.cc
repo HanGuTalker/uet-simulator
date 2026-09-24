@@ -376,21 +376,28 @@ RoceInvariantCrcTrailer::Calculate(Ptr<const Packet> packet)
 bool
 IsRoceDataOpcode(RoceOpcode opcode)
 {
-    return static_cast<uint8_t>(opcode) <= static_cast<uint8_t>(RoceOpcode::RC_WRITE_ONLY);
+    return opcode == RoceOpcode::RC_SEND_FIRST || opcode == RoceOpcode::RC_SEND_MIDDLE ||
+           opcode == RoceOpcode::RC_SEND_LAST || opcode == RoceOpcode::RC_SEND_ONLY ||
+           IsRoceWriteOpcode(opcode) || IsRoceReadRequestOpcode(opcode) ||
+           IsRoceReadResponseOpcode(opcode);
 }
 
 bool
 IsRoceFirstOpcode(RoceOpcode opcode)
 {
     return opcode == RoceOpcode::RC_SEND_FIRST || opcode == RoceOpcode::RC_SEND_ONLY ||
-           opcode == RoceOpcode::RC_WRITE_FIRST || opcode == RoceOpcode::RC_WRITE_ONLY;
+           opcode == RoceOpcode::RC_WRITE_FIRST || opcode == RoceOpcode::RC_WRITE_ONLY ||
+           opcode == RoceOpcode::RC_READ_REQUEST || opcode == RoceOpcode::RC_READ_RESPONSE_FIRST ||
+           opcode == RoceOpcode::RC_READ_RESPONSE_ONLY;
 }
 
 bool
 IsRoceLastOpcode(RoceOpcode opcode)
 {
     return opcode == RoceOpcode::RC_SEND_LAST || opcode == RoceOpcode::RC_SEND_ONLY ||
-           opcode == RoceOpcode::RC_WRITE_LAST || opcode == RoceOpcode::RC_WRITE_ONLY;
+           opcode == RoceOpcode::RC_WRITE_LAST || opcode == RoceOpcode::RC_WRITE_ONLY ||
+           opcode == RoceOpcode::RC_READ_REQUEST || opcode == RoceOpcode::RC_READ_RESPONSE_LAST ||
+           opcode == RoceOpcode::RC_READ_RESPONSE_ONLY;
 }
 
 bool
@@ -398,6 +405,21 @@ IsRoceWriteOpcode(RoceOpcode opcode)
 {
     return opcode == RoceOpcode::RC_WRITE_FIRST || opcode == RoceOpcode::RC_WRITE_MIDDLE ||
            opcode == RoceOpcode::RC_WRITE_LAST || opcode == RoceOpcode::RC_WRITE_ONLY;
+}
+
+bool
+IsRoceReadRequestOpcode(RoceOpcode opcode)
+{
+    return opcode == RoceOpcode::RC_READ_REQUEST;
+}
+
+bool
+IsRoceReadResponseOpcode(RoceOpcode opcode)
+{
+    return opcode == RoceOpcode::RC_READ_RESPONSE_FIRST ||
+           opcode == RoceOpcode::RC_READ_RESPONSE_MIDDLE ||
+           opcode == RoceOpcode::RC_READ_RESPONSE_LAST ||
+           opcode == RoceOpcode::RC_READ_RESPONSE_ONLY;
 }
 
 } // namespace ns3

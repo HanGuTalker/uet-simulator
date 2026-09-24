@@ -7,7 +7,7 @@ The model follows *ByteDance veRoCE Transport Protocol*, version 2.0.4, dated 18
 destination port 4794. RoCEv2-compatible BTH, RETH, AETH, CNP and invariant-CRC primitives are
 shared from the `roce` module; veRoCE extensions remain in the `veroce` module.
 
-## Implemented P2 core
+## Implemented P2 core and P3 Read path
 
 - RC Write and Send packetization. The common `MESSAGE` operation maps to RDMA Write.
 - BTH retransmission flag and veRoCE opcodes.
@@ -28,15 +28,20 @@ shared from the `roce` module; veRoCE extensions remain in the `veroce` module.
   shortened packet. The receiver returns an immediate Packet Drop NAK for exactly one PSN.
 - Receiver-side message completion after every PO from zero through the Last/Only packet is
   present, independent of packet arrival order.
+- RDMA Read request/response processing with a zero-payload request carrying RETH, fragmented Read
+  Response First/Middle/Last/Only packets, requester-side completion, and independent request and
+  response PSN receive spaces.
+- Read-response cumulative ACK/SACK, timeout retransmission, selective fast retransmission and
+  response-space Packet Drop NAK recovery after switch trimming.
 
 ## Deliberate limitations
 
-This is a runnable P2 data-plane implementation, not a claim of full veRoCE 2.0.4 conformance.
-RDMA Read, Atomic, Write-with-Immediate, shared receive queues, CM/profile negotiation and complete
-P0/P1/P3 behavior remain separate milestones. The simulated endpoint ICRC protects the transport
-image; ns-3 owns the outer IP/UDP serialization, so mutable outer fields are not copied into the
-endpoint's CRC calculation. The trimming queue recalculates the shortened transport ICRC and outer
-packet lengths.
+This is a runnable P2 data-plane implementation with the P3 RDMA Read path, not a claim of full
+veRoCE 2.0.4 conformance. Atomic, Write-with-Immediate, shared receive queues, CM/profile
+negotiation and the remaining P0/P1/P3 behavior remain separate milestones. The simulated endpoint
+ICRC protects the transport image; ns-3 owns the outer IP/UDP serialization, so mutable outer fields
+are not copied into the endpoint's CRC calculation. The trimming queue recalculates the shortened
+transport ICRC and outer packet lengths.
 
 The comparison framework reports only implemented capabilities. In particular,
 `reliableOrdered=false` and `jobScheduling=false` until those behaviors exist and have targeted
@@ -56,5 +61,11 @@ regression suite:
   188 received trim notifications, 161 single-PSN Packet Drop NAKs, zero queue drops and zero
   timeout retransmissions. Aggregate goodput was 142.170 Gbit/s in this deliberately aggressive
   functional test.
+- two-node 1 MiB RDMA Read at 800 Gbit/s: 1/1 completed in 14.797 us at 566.913 Gbit/s, without a
+  recovery event;
+- four-node, two-group 256 KiB RDMA Read All-to-All: 24/24 completed at 613.008 Gbit/s aggregate
+  goodput; and
+- four-node 1 MiB RDMA Read All-to-All with aggressive 4/8/32 KiB trimming thresholds: 12/12
+  completed despite 2,853 trimmed responses, exercising response ACK/SACK, NAK and retransmission.
 
 These are functional smoke results, not a protocol-performance comparison or tuning claim.
