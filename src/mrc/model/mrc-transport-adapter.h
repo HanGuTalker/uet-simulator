@@ -154,6 +154,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
         uint32_t pathId{0};
         MrcEndpointOperation operation{MrcEndpointOperation::EV_PROBE};
         Time sent{Seconds(0)};
+        EventId timeout;
     };
 
     struct EndpointPathState
@@ -195,6 +196,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
                               uint16_t requestId,
                               MrcEndpointOperation operation,
                               uint16_t timestamp);
+    void HandleEndpointTimeout(uint64_t requestKey);
     void ProcessAck(uint32_t connectionId, uint32_t cumulativeAck);
     void ProcessSack(uint32_t connectionId,
                      const MrcSethHeader& sack,
@@ -216,6 +218,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
     uint32_t m_pathCount{4};
     uint32_t m_receiveBitmapLength{4096};
     uint32_t m_maxWriteImmediateInflight{64};
+    Time m_endpointResponseTimeout{MicroSeconds(50)};
     uint32_t m_testDropDataSequenceOnce{0};
     bool m_testDropConsumed{false};
     uint16_t m_nextEndpointRequestId{1};

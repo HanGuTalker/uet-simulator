@@ -188,16 +188,24 @@ class MrcEndpointOperationsTestCase : public TestCase
         NS_TEST_ASSERT_MSG_EQ(second->Initialize(nodes.Get(1), secondConfig), true, "second init");
         NS_TEST_ASSERT_MSG_EQ(first->AddPeer(2, interfaces.GetAddress(1)), true, "first peer");
         NS_TEST_ASSERT_MSG_EQ(second->AddPeer(1, interfaces.GetAddress(0)), true, "second peer");
+        first->SetAttribute("EndpointResponseTimeout", TimeValue(MicroSeconds(10)));
+        uint32_t observedPortMask = 0;
 
         Simulator::Schedule(NanoSeconds(1), [first]() { first->SendEvProbe(2, 3); });
         Simulator::Schedule(NanoSeconds(1),
                             [first]() { first->SendPortStatusUpdate(2, 0xa5, 1); });
-        Simulator::Stop(MilliSeconds(1));
+        Simulator::Schedule(MicroSeconds(5),
+                            [second, &observedPortMask]() {
+                                observedPortMask = second->GetPeerPortStatusMask(1);
+                                second->Dispose();
+                            });
+        Simulator::Schedule(MicroSeconds(6), [first]() { first->SendEvProbe(2, 3); });
+        Simulator::Stop(MicroSeconds(20));
         Simulator::Run();
 
-        NS_TEST_EXPECT_MSG_EQ(first->IsPathReachable(2, 3), true, "EV path is not reachable");
+        NS_TEST_EXPECT_MSG_EQ(first->IsPathReachable(2, 3), false, "EV timeout did not fail path");
         NS_TEST_EXPECT_MSG_GT(first->GetPathRtt(2, 3).GetNanoSeconds(), 0, "EV RTT is missing");
-        NS_TEST_EXPECT_MSG_EQ(second->GetPeerPortStatusMask(1), 0xa5, "Port mask changed");
+        NS_TEST_EXPECT_MSG_EQ(observedPortMask, 0xa5, "Port mask changed");
         Simulator::Destroy();
     }
 };

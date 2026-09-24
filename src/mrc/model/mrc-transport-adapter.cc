@@ -50,6 +50,11 @@ MrcTransportAdapter::GetTypeId()
                           UintegerValue(64),
                           MakeUintegerAccessor(&MrcTransportAdapter::m_maxWriteImmediateInflight),
                           MakeUintegerChecker<uint32_t>(1, 65535))
+            .AddAttribute("EndpointResponseTimeout",
+                          "Time to wait for a best-effort Endpoint Operation response.",
+                          TimeValue(MicroSeconds(50)),
+                          MakeTimeAccessor(&MrcTransportAdapter::m_endpointResponseTimeout),
+                          MakeTimeChecker(MicroSeconds(1)))
             .AddAttribute("TestDropDataSequenceOnce",
                           "Fault-injection PSN dropped once at each responder; zero disables it.",
                           UintegerValue(0),
@@ -767,6 +772,7 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
                 path.reachable = true;
                 path.rtt = Simulator::Now() - request->second.sent;
             }
+            request->second.timeout.Cancel();
             m_endpointRequests.erase(request);
         }
     }
@@ -1174,6 +1180,11 @@ MrcTransportAdapter::SendEndpointRequest(uint32_t endpointId,
         m_endpointRequests.erase(key);
         return 0;
     }
+    m_endpointRequests[key].timeout = Simulator::Schedule(
+        m_endpointResponseTimeout,
+        &MrcTransportAdapter::HandleEndpointTimeout,
+        this,
+        key);
     return requestId;
 }
 
@@ -1197,6 +1208,23 @@ MrcTransportAdapter::SendEndpointResponse(const RoceSimulationTag& received,
     tag.SetSourceEndpointId(m_config.endpointId);
     tag.SetDestinationEndpointId(received.GetSourceEndpointId());
     SendWirePacket(packet, tag, 0, requestId, received.GetPathId());
+}
+
+void
+MrcTransportAdapter::HandleEndpointTimeout(uint64_t requestKey)
+{
+    const auto request = m_endpointRequests.find(requestKey);
+    if (request == m_endpointRequests.end())
+    {
+        return;
+    }
+    if (request->second.operation == MrcEndpointOperation::EV_PROBE)
+    {
+        const uint64_t pathKey = (static_cast<uint64_t>(request->second.endpointId) << 32) |
+                                 request->second.pathId;
+        m_endpointPaths[pathKey].reachable = false;
+    }
+    m_endpointRequests.erase(request);
 }
 
 void
@@ -1279,6 +1307,10 @@ MrcTransportAdapter::DoDispose()
     }
     m_connections.clear();
     m_receivers.clear();
+    for (auto& entry : m_endpointRequests)
+    {
+        entry.second.timeout.Cancel();
+    }
     m_endpointRequests.clear();
     m_endpointPaths.clear();
     m_peerPortStatusMasks.clear();
