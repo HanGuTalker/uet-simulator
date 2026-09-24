@@ -35,6 +35,7 @@ MRC-specific headers and state remain in the `mrc` module.
   completions released in MSN order. Immediate values are stashed until completion and bounded by
   the configurable `MaxWriteImmediateInflight` responder-QP limit.
 - Cumulative semantic Transport ACK packets, kept logically independent from Reliability SACKs.
+  ACK AETH packets advertise the mandatory no-credit value `0x1f`.
 - Serialized 28-byte SETH plus eight-byte CC_STATE, including the cumulative PSN, triggering PSN
   offset, reflected entropy, QP/PDC identifiers, maximum PSN range, 64-bit selective bitmap,
   reflected timestamp, out-of-order count and cumulative received-byte clock.
@@ -43,6 +44,9 @@ MRC-specific headers and state remain in the `mrc` module.
   and at-most-once selective fast retransmission of inferred holes.
 - Retriable NACK processing, reliability-probe request/response, per-packet retransmission timers
   and retransmission on a different entropy path.
+- Requestor QP transition to ERROR after retry exhaustion or a non-retriable unexpected-event
+  NACK. WriteIMM stash exhaustion returns an AETH Invalid Request NAK and causes the remote
+  requestor QP to enter ERROR instead of incorrectly treating the condition as retriable.
 - DSCP-9 trimmed-packet recognition before payload parsing, a common `PacketTrimmed` trace,
   Reliability NACK with reason `TRIMMED`, and sender fast retransmission on a different path. The
   shared switched-fabric trim queue preserves the headers needed to identify the affected PSN.
@@ -60,7 +64,8 @@ a simulation mapping and is not presented as a verbs API.
 - Endpoint discovery request/response and negotiated connection parameters.
 - Endpoint visibility, event delivery and port/path-health state machines.
 - Memory registration/protection enforcement and complete verbs queue semantics.
-- Full QP error-state transitions for non-retriable NACKs and retry exhaustion.
+- Full verbs-driven QP lifecycle, work-completion syndromes and the remaining RC memory/protection
+  error paths.
 
 Until these functions are added, results from this adapter characterize the implemented MRC core,
 not full MRC 1.0 conformance or final MRC congestion-control performance.

@@ -93,5 +93,5 @@ Read response state. Its supported and deferred protocol functions are documente
 The MRC module registers a comparison subset with the MRC 1.0 Write and Write-with-Immediate wire
 layouts, packet spraying, out-of-order direct placement, ordered completion, independent semantic
 ACK and Reliability SACK/NACK processing, reliability probes, selective recovery, endpoint
-trimming recovery and SACK-clocked NSCC. Its implemented and deferred functions are documented in
-`docs/transport/mrc-model.md`.
+trimming recovery, retry-limit/non-retriable QP error transitions and SACK-clocked NSCC. Its
+implemented and deferred functions are documented in `docs/transport/mrc-model.md`.

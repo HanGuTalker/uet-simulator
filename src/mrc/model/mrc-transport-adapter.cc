@@ -190,7 +190,7 @@ MrcTransportAdapter::Submit(const AiTransportRequest& request)
         return false;
     }
     auto& state = connection->second;
-    if (state.messages.contains(request.messageId))
+    if (state.error != MrcQpError::NONE || state.messages.contains(request.messageId))
     {
         return false;
     }
@@ -302,11 +302,24 @@ MrcTransportAdapter::GetCounters() const
     return m_counters;
 }
 
+bool
+MrcTransportAdapter::IsConnectionInError(uint32_t connectionId) const
+{
+    return GetConnectionError(connectionId) != MrcQpError::NONE;
+}
+
+MrcQpError
+MrcTransportAdapter::GetConnectionError(uint32_t connectionId) const
+{
+    const auto connection = m_connections.find(connectionId);
+    return connection == m_connections.end() ? MrcQpError::NONE : connection->second.error;
+}
+
 void
 MrcTransportAdapter::TryTransmit(uint32_t connectionId)
 {
     auto found = m_connections.find(connectionId);
-    if (found == m_connections.end())
+    if (found == m_connections.end() || found->second.error != MrcQpError::NONE)
     {
         return;
     }
@@ -350,7 +363,7 @@ void
 MrcTransportAdapter::TransmitSequence(uint32_t connectionId, uint32_t sequence, bool retransmission)
 {
     auto connection = m_connections.find(connectionId);
-    if (connection == m_connections.end())
+    if (connection == m_connections.end() || connection->second.error != MrcQpError::NONE)
     {
         return;
     }
@@ -538,10 +551,9 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
                  !existingMessage->second.immediateDataSeen) &&
                 state.stashedImmediateValues >= m_maxWriteImmediateInflight)
             {
-                SendReliabilityNack(tag,
-                                    sequence,
-                                    tseth.GetTimestamp(),
-                                    MrcNackReason::NO_RESOURCE);
+                SendTransportNack(tag,
+                                  sequence,
+                                  RoceAethHeader::INVALID_REQUEST_NAK_SYNDROME);
                 continue;
             }
             bool newPacket = false;
@@ -620,7 +632,16 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
                 ++m_counters.integrityDrops;
                 continue;
             }
-            ProcessAck(tag.GetConnectionId(), bth.GetPacketSequence());
+            if ((aeth.GetSyndrome() & 0xe0) == RoceAethHeader::ACK_SYNDROME)
+            {
+                ProcessAck(tag.GetConnectionId(), bth.GetPacketSequence());
+            }
+            else
+            {
+                ProcessTransportNack(tag.GetConnectionId(),
+                                     bth.GetPacketSequence(),
+                                     aeth.GetSyndrome());
+            }
         }
         else if (opcode == MrcOpcode::RELIABILITY_SACK)
         {
@@ -671,7 +692,8 @@ MrcTransportAdapter::SendTransportAck(const RoceSimulationTag& received, uint32_
 {
     Ptr<Packet> packet = Create<Packet>();
     RoceAethHeader aeth;
-    aeth.SetSyndrome(RoceAethHeader::ACK_SYNDROME);
+    // MRC does not advertise message-level credits and requires the AETH credit field to be 0x1f.
+    aeth.SetSyndrome(RoceAethHeader::ACK_SYNDROME | 0x1f);
     packet->AddHeader(aeth);
     RoceBthHeader bth;
     bth.SetOpcode(static_cast<RoceOpcode>(MrcOpcode::TRANSPORT_ACK));
@@ -687,6 +709,32 @@ MrcTransportAdapter::SendTransportAck(const RoceSimulationTag& received, uint32_
                    response,
                    received.GetConnectionId(),
                    cumulativeAck,
+                   received.GetPathId());
+}
+
+void
+MrcTransportAdapter::SendTransportNack(const RoceSimulationTag& received,
+                                       uint32_t packetSequence,
+                                       uint8_t syndrome)
+{
+    Ptr<Packet> packet = Create<Packet>();
+    RoceAethHeader aeth;
+    aeth.SetSyndrome(syndrome);
+    packet->AddHeader(aeth);
+    RoceBthHeader bth;
+    bth.SetOpcode(static_cast<RoceOpcode>(MrcOpcode::TRANSPORT_ACK));
+    bth.SetDestinationQp(received.GetConnectionId());
+    bth.SetPacketSequence(packetSequence);
+    packet->AddHeader(bth);
+    RoceSimulationTag response;
+    response.SetSourceEndpointId(m_config.endpointId);
+    response.SetDestinationEndpointId(received.GetSourceEndpointId());
+    response.SetConnectionId(received.GetConnectionId());
+    response.SetMessageId(received.GetMessageId());
+    SendWirePacket(packet,
+                   response,
+                   received.GetConnectionId(),
+                   packetSequence,
                    received.GetPathId());
 }
 
@@ -946,14 +994,19 @@ MrcTransportAdapter::ProcessNack(uint32_t connectionId, const MrcNethHeader& nac
     }
     auto pending = connection->second.pending.find(nack.GetNackPsn());
     if (pending == connection->second.pending.end() || !pending->second.sent ||
-        pending->second.reliabilityAcknowledged ||
-        pending->second.retransmissions >= m_config.maxRetransmissions)
+        pending->second.reliabilityAcknowledged)
     {
         return;
     }
     NotifyNack(connectionId, nack.GetNackPsn());
     if (nack.GetReason() == MrcNackReason::UNEXPECTED_EVENT)
     {
+        TransitionConnectionToError(connectionId, MrcQpError::REMOTE_OPERATION_ERROR);
+        return;
+    }
+    if (pending->second.retransmissions >= m_config.maxRetransmissions)
+    {
+        TransitionConnectionToError(connectionId, MrcQpError::RETRY_COUNTER_EXCEEDED);
         return;
     }
     ++pending->second.retransmissions;
@@ -965,6 +1018,39 @@ MrcTransportAdapter::ProcessNack(uint32_t connectionId, const MrcNethHeader& nac
         NotifyCongestionWindow(connectionId, oldWindow, connection->second.congestionWindow);
     }
     TransmitSequence(connectionId, nack.GetNackPsn(), true);
+}
+
+void
+MrcTransportAdapter::ProcessTransportNack(uint32_t connectionId,
+                                          uint32_t sequence,
+                                          uint8_t syndrome)
+{
+    NotifyNack(connectionId, sequence);
+    const uint8_t code = syndrome & 0x7f;
+    TransitionConnectionToError(
+        connectionId,
+        code == RoceAethHeader::INVALID_REQUEST_NAK_SYNDROME
+            ? MrcQpError::REMOTE_INVALID_REQUEST
+            : MrcQpError::REMOTE_OPERATION_ERROR);
+}
+
+void
+MrcTransportAdapter::TransitionConnectionToError(uint32_t connectionId, MrcQpError error)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() || connection->second.error != MrcQpError::NONE)
+    {
+        return;
+    }
+    auto& state = connection->second;
+    state.error = error;
+    state.transmitQueue.clear();
+    state.inflightBytes = 0;
+    for (auto& [sequence, pending] : state.pending)
+    {
+        (void)sequence;
+        pending.timeout.Cancel();
+    }
 }
 
 void
@@ -1005,9 +1091,13 @@ MrcTransportAdapter::HandleTimeout(uint32_t connectionId, uint32_t sequence)
         return;
     }
     auto pending = connection->second.pending.find(sequence);
-    if (pending == connection->second.pending.end() ||
-        pending->second.retransmissions >= m_config.maxRetransmissions)
+    if (pending == connection->second.pending.end())
     {
+        return;
+    }
+    if (pending->second.retransmissions >= m_config.maxRetransmissions)
+    {
+        TransitionConnectionToError(connectionId, MrcQpError::RETRY_COUNTER_EXCEEDED);
         return;
     }
     NotifyTimeout(connectionId, sequence);

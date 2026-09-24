@@ -118,6 +118,9 @@ class RoceAethHeader : public Header
     static constexpr uint32_t SERIALIZED_SIZE = 4;
     static constexpr uint8_t ACK_SYNDROME = 0x00;
     static constexpr uint8_t SEQUENCE_NAK_SYNDROME = 0x60;
+    static constexpr uint8_t INVALID_REQUEST_NAK_SYNDROME = 0x61;
+    static constexpr uint8_t REMOTE_ACCESS_NAK_SYNDROME = 0x62;
+    static constexpr uint8_t REMOTE_OPERATION_NAK_SYNDROME = 0x63;
 
     static TypeId GetTypeId();
     TypeId GetInstanceTypeId() const override;

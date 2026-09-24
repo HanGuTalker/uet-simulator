@@ -5,6 +5,7 @@
 
 #include "ns3/mrc-header.h"
 #include "ns3/packet.h"
+#include "ns3/roce-v2-header.h"
 #include "ns3/test.h"
 
 using namespace ns3;
@@ -30,6 +31,16 @@ class MrcReliabilityHeaderTestCase : public TestCase
         NS_TEST_EXPECT_MSG_EQ(decodedImmediate.GetImmediateData(),
                               0xdeadbeef,
                               "Immediate Data changed");
+
+        RoceAethHeader invalidRequest;
+        invalidRequest.SetSyndrome(RoceAethHeader::INVALID_REQUEST_NAK_SYNDROME);
+        packet = Create<Packet>();
+        packet->AddHeader(invalidRequest);
+        RoceAethHeader decodedAeth;
+        packet->RemoveHeader(decodedAeth);
+        NS_TEST_EXPECT_MSG_EQ(decodedAeth.GetSyndrome(),
+                              RoceAethHeader::INVALID_REQUEST_NAK_SYNDROME,
+                              "Invalid-request transport NAK syndrome changed");
 
         MrcCcStateHeader cc;
         cc.SetTimestamp(0x1234);

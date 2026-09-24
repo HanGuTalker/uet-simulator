@@ -26,7 +26,15 @@ namespace ns3
 
 class Socket;
 
-/** Initial MRC 1.0 Write data path with multipath OOO placement and reliable recovery. */
+enum class MrcQpError : uint8_t
+{
+    NONE = 0,
+    RETRY_COUNTER_EXCEEDED = 1,
+    REMOTE_INVALID_REQUEST = 2,
+    REMOTE_OPERATION_ERROR = 3,
+};
+
+/** MRC 1.0 comparison data path with multipath OOO placement and reliable recovery. */
 class MrcTransportAdapter : public AiTransportEndpoint
 {
   public:
@@ -48,6 +56,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
     bool ConfigureJobScheduler(uint64_t lineRateBps) override;
     bool AssignConnectionToJob(uint32_t connectionId, uint32_t jobId, uint32_t weight) override;
     AiTransportCounters GetCounters() const override;
+    bool IsConnectionInError(uint32_t connectionId) const;
+    MrcQpError GetConnectionError(uint32_t connectionId) const;
 
   private:
     struct Peer
@@ -96,6 +106,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
         uint32_t nextPath{0};
         uint32_t congestionWindow{65536};
         uint32_t inflightBytes{0};
+        MrcQpError error{MrcQpError::NONE};
         Time retransmissionTimeout{MicroSeconds(50)};
         MrcNscc nscc;
         uint32_t previousReceivedByteUnits{0};
@@ -140,6 +151,9 @@ class MrcTransportAdapter : public AiTransportEndpoint
                         uint32_t sequence,
                         uint32_t pathId);
     void SendTransportAck(const RoceSimulationTag& received, uint32_t cumulativeAck);
+    void SendTransportNack(const RoceSimulationTag& received,
+                           uint32_t packetSequence,
+                           uint8_t syndrome);
     void SendReliabilitySack(const RoceSimulationTag& received,
                              const ReceiverState& state,
                              uint32_t acknowledgedPsn,
@@ -157,6 +171,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
                      const MrcSethHeader& sack,
                      const MrcCcStateHeader& ccState);
     void ProcessNack(uint32_t connectionId, const MrcNethHeader& nack);
+    void ProcessTransportNack(uint32_t connectionId, uint32_t sequence, uint8_t syndrome);
+    void TransitionConnectionToError(uint32_t connectionId, MrcQpError error);
     void MarkReliabilityAcknowledged(ConnectionState& state, uint32_t sequence);
     void HandleTimeout(uint32_t connectionId, uint32_t sequence);
     uint64_t ReceiverKey(uint32_t sourceEndpointId, uint32_t connectionId) const;
