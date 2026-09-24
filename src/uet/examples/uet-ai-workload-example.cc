@@ -59,6 +59,7 @@ class AiWorkload
              uint32_t backgroundJobWeight,
              bool enableWorkConservingScheduler,
              bool enableEcn,
+             bool enableTrimming,
              uint32_t ecnMinBytes,
              uint32_t ecnMaxBytes,
              uint32_t ecnQueueLimitBytes,
@@ -74,7 +75,7 @@ class AiWorkload
         m_linkRate = linkRate;
         m_linkRateBps = linkRateBps;
         m_linkDelayNs = linkDelayNs;
-        m_queuePackets = enableEcn ? 1 : queuePackets;
+        m_queuePackets = (enableEcn || enableTrimming) ? 1 : queuePackets;
         m_reusePdc = reusePdc;
         m_warmupBytes = warmupBytes;
         m_measurementStartUs = measurementStartUs;
@@ -117,7 +118,8 @@ class AiWorkload
             m_backgroundPdcLineRateBps =
                 std::max<uint64_t>(1, backgroundGroupRate / (nodeCount - 1));
         }
-        m_enableEcn = enableEcn;
+        m_enableEcn = enableEcn || enableTrimming;
+        m_enableTrimming = enableTrimming;
         m_ecnMinBytes = ecnMinBytes;
         m_ecnMaxBytes = ecnMaxBytes;
         m_ecnQueueLimitBytes = ecnQueueLimitBytes;
@@ -138,9 +140,11 @@ class AiWorkload
             link.SetDeviceAttribute("DataRate", StringValue(linkRate));
             link.SetDeviceAttribute("Mtu", UintegerValue(9000));
             link.SetChannelAttribute("Delay", TimeValue(NanoSeconds(linkDelayNs)));
-            link.SetQueue("ns3::DropTailQueue",
-                          "MaxSize",
-                          StringValue(std::to_string(enableEcn ? 1 : queuePackets) + "p"));
+            link.SetQueue(
+                "ns3::DropTailQueue",
+                "MaxSize",
+                StringValue(std::to_string((enableEcn || enableTrimming) ? 1 : queuePackets) +
+                            "p"));
             for (uint32_t i = 0; i < nodeCount; ++i)
             {
                 auto devices = link.Install(NodeContainer(nodes.Get(i), router.Get(0)));
@@ -164,9 +168,11 @@ class AiWorkload
             link.SetDeviceAttribute("DataRate", StringValue(linkRate));
             link.SetDeviceAttribute("Mtu", UintegerValue(9000));
             link.SetChannelAttribute("Delay", TimeValue(NanoSeconds(linkDelayNs)));
-            link.SetQueue("ns3::DropTailQueue",
-                          "MaxSize",
-                          StringValue(std::to_string(enableEcn ? 1 : queuePackets) + "p"));
+            link.SetQueue(
+                "ns3::DropTailQueue",
+                "MaxSize",
+                StringValue(std::to_string((enableEcn || enableTrimming) ? 1 : queuePackets) +
+                            "p"));
             const uint32_t nodesPerLeaf = nodeCount / 2;
             for (uint32_t i = 0; i < nodeCount; ++i)
             {
@@ -216,29 +222,43 @@ class AiWorkload
             }
         }
 
-        if (enableEcn)
+        if (enableEcn || enableTrimming)
         {
             TrafficControlHelper traffic;
-            traffic.SetRootQueueDisc(
-                "ns3::RedQueueDisc",
-                "LinkBandwidth",
-                StringValue(linkRate),
-                "LinkDelay",
-                TimeValue(NanoSeconds(linkDelayNs)),
-                "MinTh",
-                DoubleValue(ecnMinBytes),
-                "MaxTh",
-                DoubleValue(ecnMaxBytes),
-                "MaxSize",
-                QueueSizeValue(QueueSize(std::to_string(ecnQueueLimitBytes) + "B")),
-                "MeanPktSize",
-                UintegerValue(4186),
-                "QW",
-                DoubleValue(1.0),
-                "UseEcn",
-                BooleanValue(true),
-                "UseHardDrop",
-                BooleanValue(false));
+            if (enableTrimming)
+            {
+                traffic.SetRootQueueDisc(
+                    "ns3::VeRoceTrimQueueDisc",
+                    "MarkThresholdBytes",
+                    UintegerValue(ecnMinBytes),
+                    "TrimThresholdBytes",
+                    UintegerValue(ecnMaxBytes),
+                    "MaxSize",
+                    QueueSizeValue(QueueSize(std::to_string(ecnQueueLimitBytes) + "B")));
+            }
+            else
+            {
+                traffic.SetRootQueueDisc(
+                    "ns3::RedQueueDisc",
+                    "LinkBandwidth",
+                    StringValue(linkRate),
+                    "LinkDelay",
+                    TimeValue(NanoSeconds(linkDelayNs)),
+                    "MinTh",
+                    DoubleValue(ecnMinBytes),
+                    "MaxTh",
+                    DoubleValue(ecnMaxBytes),
+                    "MaxSize",
+                    QueueSizeValue(QueueSize(std::to_string(ecnQueueLimitBytes) + "B")),
+                    "MeanPktSize",
+                    UintegerValue(4186),
+                    "QW",
+                    DoubleValue(1.0),
+                    "UseEcn",
+                    BooleanValue(true),
+                    "UseHardDrop",
+                    BooleanValue(false));
+            }
             for (uint32_t i = 0; i < routerEgressDevices.size(); ++i)
             {
                 traffic.Uninstall(routerEgressDevices[i]);
@@ -906,6 +926,10 @@ class AiWorkload
             m_rxDatagrams += counters.receivedDatagrams;
             m_mtuDrops += counters.mtuDrops;
             m_crcDrops += counters.integrityDrops;
+            m_selectiveAcknowledgments += counters.selectiveAcknowledgments;
+            m_fastRetransmissions += counters.fastRetransmissions;
+            m_rttProbes += counters.rttProbes;
+            m_slowPathSignals += counters.slowPathSignals;
         }
     }
 
@@ -1060,13 +1084,15 @@ class AiWorkload
             "nscc_base_rtt_ns,nscc_target_queue_delay_ns,nscc_initial_window_bytes,"
             "nscc_requested_initial_window_bytes,auto_scale_initial_window,measurement_start_cwnd_"
             "bytes,"
-            "ecn_enabled,ecn_min_bytes,ecn_max_bytes,ecn_queue_limit_bytes,peak_queue_bytes,"
+            "ecn_enabled,trimming_enabled,ecn_min_bytes,ecn_max_bytes,ecn_queue_limit_bytes,peak_"
+            "queue_bytes,"
             "queue_marked_packets,queue_marked_bytes,queue_dropped_packets,queue_dropped_bytes,"
             "expected,submitted,completed,"
             "completion_rate,completed_payload_bytes,first_submit_ns,last_completion_ns,makespan_"
             "ns,"
             "goodput_bps,mean_latency_ns,p50_latency_ns,p95_latency_ns,p99_latency_ns,"
-            "max_latency_ns,retransmissions,timeouts,nacks,ecn_marks,trimmed_packets,tx_datagrams,"
+            "max_latency_ns,retransmissions,timeouts,nacks,ecn_marks,trimmed_packets,sack_packets,"
+            "fast_retransmissions,rtt_probes,slow_path_signals,tx_datagrams,"
             "rx_datagrams,mtu_drops,crc_drops,device_queue_drops\n";
         summaries << header << m_transportName << ',' << m_pattern << ',' << m_fabricType << ','
                   << m_linkRate << ',' << m_linkRateBps << ',' << m_linkDelayNs << ','
@@ -1078,10 +1104,11 @@ class AiWorkload
                   << m_nsccTargetQueueDelayNs << ',' << m_nsccInitialWindowBytes << ','
                   << m_nsccRequestedInitialWindowBytes << ',' << (m_autoScaleInitialWindow ? 1 : 0)
                   << ',' << MeanMeasurementStartCwnd() << ',' << (m_enableEcn ? 1 : 0) << ','
-                  << m_ecnMinBytes << ',' << m_ecnMaxBytes << ',' << m_ecnQueueLimitBytes << ','
-                  << m_peakQueueBytes << ',' << m_queueMarkedPackets << ',' << m_queueMarkedBytes
-                  << ',' << m_queueDroppedPackets << ',' << m_queueDroppedBytes << ','
-                  << summary.expected << ',' << summary.submitted << ',' << summary.completed << ','
+                  << (m_enableTrimming ? 1 : 0) << ',' << m_ecnMinBytes << ',' << m_ecnMaxBytes
+                  << ',' << m_ecnQueueLimitBytes << ',' << m_peakQueueBytes << ','
+                  << m_queueMarkedPackets << ',' << m_queueMarkedBytes << ','
+                  << m_queueDroppedPackets << ',' << m_queueDroppedBytes << ',' << summary.expected
+                  << ',' << summary.submitted << ',' << summary.completed << ','
                   << std::setprecision(10) << summary.completionRate << ','
                   << summary.completedBytes << ',' << summary.firstSubmitNs << ','
                   << summary.lastCompletionNs << ',' << summary.makespanNs << ','
@@ -1089,11 +1116,13 @@ class AiWorkload
                   << summary.p50LatencyNs << ',' << summary.p95LatencyNs << ','
                   << summary.p99LatencyNs << ',' << summary.maxLatencyNs << ',' << m_retransmissions
                   << ',' << m_timeouts << ',' << m_nacks << ',' << m_ecnMarks << ','
-                  << m_trimmedPackets << ',' << m_txDatagrams << ',' << m_rxDatagrams << ','
-                  << m_mtuDrops << ',' << m_crcDrops << ',' << m_deviceQueueDrops << '\n';
+                  << m_trimmedPackets << ',' << m_selectiveAcknowledgments << ','
+                  << m_fastRetransmissions << ',' << m_rttProbes << ',' << m_slowPathSignals << ','
+                  << m_txDatagrams << ',' << m_rxDatagrams << ',' << m_mtuDrops << ',' << m_crcDrops
+                  << ',' << m_deviceQueueDrops << '\n';
 
         json << std::fixed << std::setprecision(3) << "{\n"
-             << "  \"schema_version\": 2,\n"
+             << "  \"schema_version\": 3,\n"
              << "  \"protocol\": \"" << m_transportName << "\",\n"
              << "  \"pattern\": \"" << m_pattern << "\",\n"
              << "  \"fabric\": \"" << m_fabricType << "\",\n"
@@ -1135,6 +1164,7 @@ class AiWorkload
              << ", \"auto_scaled_initial_window\": "
              << (m_autoScaleInitialWindow ? "true" : "false") << "},\n"
              << "  \"ecn_queue\": {\"enabled\": " << (m_enableEcn ? "true" : "false")
+             << ", \"trimming_enabled\": " << (m_enableTrimming ? "true" : "false")
              << ", \"min_bytes\": " << m_ecnMinBytes << ", \"max_bytes\": " << m_ecnMaxBytes
              << ", \"limit_bytes\": " << m_ecnQueueLimitBytes
              << ", \"peak_bytes\": " << m_peakQueueBytes
@@ -1157,7 +1187,10 @@ class AiWorkload
              << "  \"protocol_events\": {\"retransmissions\": " << m_retransmissions
              << ", \"timeouts\": " << m_timeouts << ", \"nacks\": " << m_nacks
              << ", \"ecn_marks\": " << m_ecnMarks << ", \"trimmed_packets\": " << m_trimmedPackets
-             << "},\n"
+             << ", \"sack_packets\": " << m_selectiveAcknowledgments
+             << ", \"fast_retransmissions\": " << m_fastRetransmissions
+             << ", \"rtt_probes\": " << m_rttProbes
+             << ", \"slow_path_signals\": " << m_slowPathSignals << "},\n"
              << "  \"transport\": {\"tx_datagrams\": " << m_txDatagrams
              << ", \"rx_datagrams\": " << m_rxDatagrams << ", \"mtu_drops\": " << m_mtuDrops
              << ", \"crc_drops\": " << m_crcDrops << "},\n"
@@ -1220,6 +1253,7 @@ class AiWorkload
     uint32_t m_backgroundMessagesRemaining{0};
     int64_t m_jobRateReleasedNs{-1};
     bool m_enableEcn{false};
+    bool m_enableTrimming{false};
     uint32_t m_ecnMinBytes{204800};
     uint32_t m_ecnMaxBytes{409600};
     uint32_t m_ecnQueueLimitBytes{2097152};
@@ -1254,6 +1288,10 @@ class AiWorkload
     uint64_t m_nacks{0};
     uint64_t m_ecnMarks{0};
     uint64_t m_trimmedPackets{0};
+    uint64_t m_selectiveAcknowledgments{0};
+    uint64_t m_fastRetransmissions{0};
+    uint64_t m_rttProbes{0};
+    uint64_t m_slowPathSignals{0};
     uint64_t m_txDatagrams{0};
     uint64_t m_rxDatagrams{0};
     uint64_t m_mtuDrops{0};
@@ -1302,6 +1340,7 @@ main(int argc, char* argv[])
     uint32_t backgroundJobWeight = 0;
     bool enableWorkConservingScheduler = false;
     bool enableEcn = false;
+    bool enableTrimming = false;
     uint32_t ecnMinBytes = 204800;
     uint32_t ecnMaxBytes = 409600;
     uint32_t ecnQueueLimitBytes = 2097152;
@@ -1356,6 +1395,9 @@ main(int argc, char* argv[])
     command.AddValue("enableEcn",
                      "Install RED/ECN on the switched receiver-facing link",
                      enableEcn);
+    command.AddValue("enableTrimming",
+                     "Install the veRoCE ECN/packet-trimming queue discipline",
+                     enableTrimming);
     command.AddValue("ecnMinBytes", "RED minimum ECN threshold in bytes", ecnMinBytes);
     command.AddValue("ecnMaxBytes", "RED maximum ECN threshold in bytes", ecnMaxBytes);
     command.AddValue("ecnQueueLimitBytes", "RED hard queue limit in bytes", ecnQueueLimitBytes);
@@ -1379,8 +1421,10 @@ main(int argc, char* argv[])
         (fabric == "leaf-spine" && (nodes < 4 || nodes % 2 != 0)) || linkDelayNs == 0 ||
         queuePackets == 0 || nsccBaseRttNs < 128 || nsccTargetQueueDelayNs < 128 ||
         nsccInitialWindowBytes == 0 ||
-        (enableEcn && (fabric == "csma" || ecnMinBytes == 0 || ecnMinBytes >= ecnMaxBytes ||
-                       ecnMaxBytes >= ecnQueueLimitBytes)) ||
+        ((enableEcn || enableTrimming) &&
+         (fabric == "csma" || ecnMinBytes == 0 || ecnMinBytes >= ecnMaxBytes ||
+          ecnMaxBytes >= ecnQueueLimitBytes)) ||
+        (enableTrimming && ParseAiTransportProtocol(transport) != AiTransportProtocol::VEROCE) ||
         (warmupBytes > 0 && (!reusePdc || measurementStartUs == 0)))
     {
         return 2;
@@ -1413,6 +1457,7 @@ main(int argc, char* argv[])
                         backgroundJobWeight,
                         enableWorkConservingScheduler,
                         enableEcn,
+                        enableTrimming,
                         ecnMinBytes,
                         ecnMaxBytes,
                         ecnQueueLimitBytes,

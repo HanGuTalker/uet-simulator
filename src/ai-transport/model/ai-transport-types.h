@@ -106,6 +106,10 @@ struct AiTransportCounters
     uint64_t receivedDatagrams{0};
     uint64_t mtuDrops{0};
     uint64_t integrityDrops{0};
+    uint64_t selectiveAcknowledgments{0};
+    uint64_t fastRetransmissions{0};
+    uint64_t rttProbes{0};
+    uint64_t slowPathSignals{0};
 };
 
 std::string ToString(AiTransportProtocol protocol);

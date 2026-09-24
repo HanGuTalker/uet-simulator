@@ -5,6 +5,8 @@
 
 #include "veroce-transport-adapter.h"
 
+#include "veroce-trim-queue-disc.h"
+
 #include "ns3/double.h"
 #include "ns3/inet-socket-address.h"
 #include "ns3/ipv4-address.h"
@@ -76,7 +78,37 @@ VeRoceTransportAdapter::GetTypeId()
                           "Minimum interval between path-specific CNP packets.",
                           TimeValue(MicroSeconds(50)),
                           MakeTimeAccessor(&VeRoceTransportAdapter::m_cnpInterval),
-                          MakeTimeChecker(MicroSeconds(1)));
+                          MakeTimeChecker(MicroSeconds(1)))
+            .AddAttribute("RttProbeInterval",
+                          "Interval between standalone RTT probes on each path.",
+                          TimeValue(MicroSeconds(20)),
+                          MakeTimeAccessor(&VeRoceTransportAdapter::m_rttProbeInterval),
+                          MakeTimeChecker(MicroSeconds(1)))
+            .AddAttribute("SlowPacketPsnThreshold",
+                          "PSN lag that causes a receiver slow-path signal.",
+                          UintegerValue(16),
+                          MakeUintegerAccessor(&VeRoceTransportAdapter::m_slowPacketPsnThreshold),
+                          MakeUintegerChecker<uint32_t>(1, 0x7fffff))
+            .AddAttribute("SlowSignalThreshold",
+                          "Signals required within a window to quarantine a path.",
+                          UintegerValue(3),
+                          MakeUintegerAccessor(&VeRoceTransportAdapter::m_slowSignalThreshold),
+                          MakeUintegerChecker<uint32_t>(1))
+            .AddAttribute("SlowSignalWindow",
+                          "Window over which slow-path signals are accumulated.",
+                          TimeValue(MicroSeconds(100)),
+                          MakeTimeAccessor(&VeRoceTransportAdapter::m_slowSignalWindow),
+                          MakeTimeChecker(MicroSeconds(1)))
+            .AddAttribute("SlowPathHoldDown",
+                          "Time for which a detected slow path is avoided.",
+                          TimeValue(MicroSeconds(200)),
+                          MakeTimeAccessor(&VeRoceTransportAdapter::m_slowPathHoldDown),
+                          MakeTimeChecker(MicroSeconds(1)))
+            .AddAttribute("SlowRttFactor",
+                          "RTT ratio to the best measured path that marks a path slow.",
+                          DoubleValue(2.0),
+                          MakeDoubleAccessor(&VeRoceTransportAdapter::m_slowRttFactor),
+                          MakeDoubleChecker<double>(1.0));
     return tid;
 }
 
@@ -98,7 +130,7 @@ VeRoceTransportAdapter::GetCapabilities() const
     capabilities.selectiveAcknowledgment = true;
     capabilities.packetSpraying = true;
     capabilities.perPathCongestionControl = true;
-    capabilities.endpointTrimming = false;
+    capabilities.endpointTrimming = true;
     capabilities.jobScheduling = false;
     return capabilities;
 }
@@ -236,6 +268,21 @@ VeRoceTransportAdapter::Submit(const AiTransportRequest& request)
         state.transmitQueue.push_back(sequence);
         offset += bytes;
     }
+    for (uint32_t pathId = 0; pathId < state.paths.size(); ++pathId)
+    {
+        if (!state.paths[pathId].probeEvent.IsPending())
+        {
+            const int64_t staggerNs = m_rttProbeInterval.GetNanoSeconds() *
+                                      static_cast<int64_t>(pathId + 1) /
+                                      static_cast<int64_t>(state.paths.size() + 1);
+            state.paths[pathId].probeEvent =
+                Simulator::Schedule(NanoSeconds(staggerNs),
+                                    &VeRoceTransportAdapter::SendRttProbe,
+                                    this,
+                                    request.connectionId,
+                                    pathId);
+        }
+    }
     TryTransmit(request.connectionId);
     return true;
 }
@@ -323,6 +370,29 @@ VeRoceTransportAdapter::SelectOpcode(AiTransportOperation operation,
     return write ? RoceOpcode::RC_WRITE_MIDDLE : RoceOpcode::RC_SEND_MIDDLE;
 }
 
+uint32_t
+VeRoceTransportAdapter::SelectPath(ConnectionState& state)
+{
+    const uint32_t pathCount = state.paths.size();
+    uint32_t earliestPath = state.nextPath % pathCount;
+    Time earliestRelease = Time::Max();
+    for (uint32_t attempt = 0; attempt < pathCount; ++attempt)
+    {
+        const uint32_t pathId = state.nextPath++ % pathCount;
+        const auto& path = state.paths[pathId];
+        if (path.slowUntil <= Simulator::Now())
+        {
+            return pathId;
+        }
+        if (path.slowUntil < earliestRelease)
+        {
+            earliestRelease = path.slowUntil;
+            earliestPath = pathId;
+        }
+    }
+    return earliestPath;
+}
+
 void
 VeRoceTransportAdapter::TryTransmit(uint32_t connectionId)
 {
@@ -348,7 +418,7 @@ VeRoceTransportAdapter::TryTransmit(uint32_t connectionId)
         state.transmitQueue.pop_front();
         state.inflightBytes += pending->second.wireBytes;
         pending->second.sent = true;
-        pending->second.pathId = state.nextPath++ % state.paths.size();
+        pending->second.pathId = SelectPath(state);
         auto& path = state.paths[pending->second.pathId];
         const Time sendAt = std::max(Simulator::Now(), path.nextSend);
         Simulator::Schedule(sendAt - Simulator::Now(),
@@ -383,7 +453,7 @@ VeRoceTransportAdapter::TransmitSequence(uint32_t connectionId,
     }
     if (retransmission)
     {
-        pending->second.pathId = connection->second.nextPath++ % connection->second.paths.size();
+        pending->second.pathId = SelectPath(connection->second);
     }
     auto packet = pending->second.payload->Copy();
     if (!IsRoceFirstOpcode(pending->second.opcode))
@@ -465,7 +535,7 @@ VeRoceTransportAdapter::SendWirePacket(Ptr<Packet> packet,
     dontFragment.Enable();
     packet->AddPacketTag(dontFragment);
     SocketIpTosTag tos;
-    tos.SetTos(0x02);
+    tos.SetTos(tag.GetPayloadBytes() > 0 ? 0x22 : 0x02);
     packet->AddPacketTag(tos);
     const Address destination =
         InetSocketAddress(Ipv4Address::ConvertFrom(peer->second.address), peer->second.port);
@@ -495,8 +565,10 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
             continue;
         }
         SocketIpTosTag tos;
-        const bool congestionExperienced =
-            packet->PeekPacketTag(tos) && (tos.GetTos() & 0x03) == 0x03;
+        const bool hasTos = packet->PeekPacketTag(tos);
+        const bool congestionExperienced = hasTos && (tos.GetTos() & 0x03) == 0x03;
+        const bool packetTrimmed =
+            hasTos && (tos.GetTos() >> 2) == VeRoceTrimQueueDisc::TRIMMED_DSCP;
         RoceInvariantCrcTrailer receivedCrc;
         packet->RemoveTrailer(receivedCrc);
         if (receivedCrc.GetCrc() != RoceInvariantCrcTrailer::Calculate(packet))
@@ -520,6 +592,12 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
             if (packet->RemoveHeader(msneth) == 0)
             {
                 ++m_counters.integrityDrops;
+                continue;
+            }
+            if (packetTrimmed)
+            {
+                NotifyPacketTrimmed(wireImage, tag.GetConnectionId(), tag.GetPathId());
+                SendPacketDropNak(tag, bth.GetPacketSequence(), msneth.GetMessageSequence());
                 continue;
             }
             if (IsRoceWriteOpcode(opcode))
@@ -554,6 +632,7 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
             const uint64_t key = ReceiverKey(tag.GetSourceEndpointId(), tag.GetConnectionId());
             auto& state = m_receivers[key];
             const uint32_t sequence = bth.GetPacketSequence();
+            const uint32_t previousHighest = state.highestPsn;
             if (sequence > state.acknowledgedPsn + m_receiveBitmapLength)
             {
                 continue;
@@ -572,6 +651,11 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
                                         packetOrder,
                                         IsRoceLastOpcode(opcode),
                                         state);
+                if (previousHighest > sequence &&
+                    previousHighest - sequence >= m_slowPacketPsnThreshold)
+                {
+                    SendSlowPathSignal(tag, sequence);
+                }
             }
             while (state.receivedPsns.erase(state.acknowledgedPsn + 1) > 0)
             {
@@ -600,7 +684,11 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
                 ++m_counters.integrityDrops;
                 continue;
             }
-            if (opcode == RoceOpcode::RC_SACK)
+            if (aeth.GetSyndrome() == RoceAethHeader::SEQUENCE_NAK_SYNDROME)
+            {
+                ProcessPacketDropNak(tag.GetConnectionId(), bth.GetPacketSequence());
+            }
+            else if (opcode == RoceOpcode::RC_SACK)
             {
                 VeRoceSackHeader sack;
                 if (packet->RemoveHeader(sack) == 0)
@@ -624,6 +712,30 @@ VeRoceTransportAdapter::Receive(Ptr<Socket> socket)
                 continue;
             }
             ProcessCnp(tag.GetConnectionId(), tag.GetPathId());
+        }
+        else if (opcode == RoceOpcode::RTT_REQUEST)
+        {
+            VeRoceRttHeader request;
+            if (packet->RemoveHeader(request) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            SendRttResponse(tag, request);
+        }
+        else if (opcode == RoceOpcode::RTT_RESPONSE)
+        {
+            VeRoceRttHeader response;
+            if (packet->RemoveHeader(response) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            ProcessRttResponse(tag.GetConnectionId(), tag.GetPathId(), response);
+        }
+        else if (opcode == RoceOpcode::SLOW_PATH)
+        {
+            ProcessSlowPathSignal(tag.GetConnectionId(), tag.GetPathId());
         }
     }
 }
@@ -680,6 +792,7 @@ VeRoceTransportAdapter::SendAcknowledgment(const RoceSimulationTag& received,
     Ptr<Packet> packet = Create<Packet>();
     if (selective)
     {
+        ++m_counters.selectiveAcknowledgments;
         VeRoceSackHeader sack;
         sack.SetBitmapStartingPsn(state.acknowledgedPsn);
         const uint32_t span = std::min<uint32_t>(VeRoceSackHeader::MAX_BITMAP_BITS,
@@ -746,6 +859,36 @@ VeRoceTransportAdapter::SendCnp(const RoceSimulationTag& received)
 }
 
 void
+VeRoceTransportAdapter::SendPacketDropNak(const RoceSimulationTag& received,
+                                          uint32_t packetSequence,
+                                          uint32_t messageSequence)
+{
+    Ptr<Packet> packet = Create<Packet>();
+    VeRocePacketOffsetHeader poeth;
+    poeth.SetPacketOrder(VeRocePacketOffsetHeader::UNAVAILABLE);
+    packet->AddHeader(poeth);
+    RoceAethHeader aeth;
+    aeth.SetSyndrome(RoceAethHeader::SEQUENCE_NAK_SYNDROME);
+    aeth.SetMessageSequence(messageSequence);
+    packet->AddHeader(aeth);
+    RoceBthHeader bth;
+    bth.SetOpcode(RoceOpcode::RC_ACK);
+    bth.SetDestinationQp(received.GetConnectionId());
+    bth.SetPacketSequence(packetSequence);
+    packet->AddHeader(bth);
+    RoceSimulationTag response;
+    response.SetSourceEndpointId(m_config.endpointId);
+    response.SetDestinationEndpointId(received.GetSourceEndpointId());
+    response.SetConnectionId(received.GetConnectionId());
+    response.SetMessageId(received.GetMessageId());
+    SendWirePacket(packet,
+                   response,
+                   received.GetConnectionId(),
+                   packetSequence,
+                   received.GetPathId());
+}
+
+void
 VeRoceTransportAdapter::ProcessAck(uint32_t connectionId, uint32_t acknowledgedPsn)
 {
     auto connection = m_connections.find(connectionId);
@@ -776,6 +919,26 @@ VeRoceTransportAdapter::ProcessAck(uint32_t connectionId, uint32_t acknowledgedP
         pending = state.pending.erase(pending);
     }
     TryTransmit(connectionId);
+}
+
+void
+VeRoceTransportAdapter::ProcessPacketDropNak(uint32_t connectionId, uint32_t packetSequence)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end())
+    {
+        return;
+    }
+    auto pending = connection->second.pending.find(packetSequence);
+    if (pending == connection->second.pending.end() || !pending->second.sent ||
+        pending->second.retransmissions >= m_config.maxRetransmissions)
+    {
+        return;
+    }
+    NotifyNack(connectionId, packetSequence);
+    ++pending->second.retransmissions;
+    ++m_counters.fastRetransmissions;
+    TransmitSequence(connectionId, packetSequence, true);
 }
 
 void
@@ -810,6 +973,7 @@ VeRoceTransportAdapter::ProcessSack(uint32_t connectionId,
             pending->second.retransmissions < m_config.maxRetransmissions)
         {
             ++pending->second.retransmissions;
+            ++m_counters.fastRetransmissions;
             TransmitSequence(connectionId, sequence, true);
         }
     }
@@ -894,6 +1058,136 @@ VeRoceTransportAdapter::RecoverPathRate(uint32_t connectionId, uint32_t pathId)
     }
 }
 
+void
+VeRoceTransportAdapter::SendRttProbe(uint32_t connectionId, uint32_t pathId)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() || pathId >= connection->second.paths.size() ||
+        connection->second.pending.empty())
+    {
+        return;
+    }
+    Ptr<Packet> packet = Create<Packet>();
+    VeRoceRttHeader rtt;
+    rtt.SetContextId((connectionId << 6) | (pathId & 0x3f));
+    rtt.SetTimestamp(0, static_cast<uint32_t>(Simulator::Now().GetNanoSeconds()));
+    packet->AddHeader(rtt);
+    RoceBthHeader bth;
+    bth.SetOpcode(RoceOpcode::RTT_REQUEST);
+    bth.SetDestinationQp(connectionId);
+    packet->AddHeader(bth);
+    RoceSimulationTag tag;
+    tag.SetSourceEndpointId(m_config.endpointId);
+    tag.SetDestinationEndpointId(connection->second.remoteEndpointId);
+    tag.SetConnectionId(connectionId);
+    ++m_counters.rttProbes;
+    SendWirePacket(packet, tag, connectionId, 0, pathId);
+    connection->second.paths[pathId].probeEvent =
+        Simulator::Schedule(m_rttProbeInterval,
+                            &VeRoceTransportAdapter::SendRttProbe,
+                            this,
+                            connectionId,
+                            pathId);
+}
+
+void
+VeRoceTransportAdapter::SendRttResponse(const RoceSimulationTag& received,
+                                        const VeRoceRttHeader& request)
+{
+    Ptr<Packet> packet = Create<Packet>();
+    VeRoceRttHeader response = request;
+    const uint32_t now = static_cast<uint32_t>(Simulator::Now().GetNanoSeconds());
+    response.SetTimestamp(1, now);
+    response.SetTimestamp(2, now);
+    response.SetTimestamp(3, 0);
+    packet->AddHeader(response);
+    RoceBthHeader bth;
+    bth.SetOpcode(RoceOpcode::RTT_RESPONSE);
+    bth.SetDestinationQp(received.GetConnectionId());
+    packet->AddHeader(bth);
+    RoceSimulationTag tag;
+    tag.SetSourceEndpointId(m_config.endpointId);
+    tag.SetDestinationEndpointId(received.GetSourceEndpointId());
+    tag.SetConnectionId(received.GetConnectionId());
+    SendWirePacket(packet, tag, received.GetConnectionId(), 0, received.GetPathId());
+}
+
+void
+VeRoceTransportAdapter::ProcessRttResponse(uint32_t connectionId,
+                                           uint32_t pathId,
+                                           const VeRoceRttHeader& response)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() || pathId >= connection->second.paths.size())
+    {
+        return;
+    }
+    const uint32_t rx2 = static_cast<uint32_t>(Simulator::Now().GetNanoSeconds());
+    const uint32_t total = rx2 - response.GetTimestamp(0);
+    const uint32_t host = response.GetTimestamp(2) - response.GetTimestamp(1);
+    const uint64_t networkRtt = total >= host ? total - host : total;
+    auto& path = connection->second.paths[pathId];
+    path.smoothedRttNs =
+        path.rttSamples == 0 ? networkRtt : (7 * path.smoothedRttNs + networkRtt) / 8;
+    ++path.rttSamples;
+    uint64_t minimumRtt = std::numeric_limits<uint64_t>::max();
+    bool allMeasured = true;
+    for (const auto& candidate : connection->second.paths)
+    {
+        allMeasured = allMeasured && candidate.rttSamples > 0;
+        if (candidate.rttSamples > 0)
+        {
+            minimumRtt = std::min(minimumRtt, candidate.smoothedRttNs);
+        }
+    }
+    if (allMeasured && path.rttSamples >= 2 && minimumRtt > 0 &&
+        static_cast<double>(path.smoothedRttNs) > m_slowRttFactor * minimumRtt)
+    {
+        path.slowUntil = std::max(path.slowUntil, Simulator::Now() + m_slowPathHoldDown);
+    }
+}
+
+void
+VeRoceTransportAdapter::SendSlowPathSignal(const RoceSimulationTag& received,
+                                           uint32_t packetSequence)
+{
+    Ptr<Packet> packet = Create<Packet>();
+    RoceBthHeader bth;
+    bth.SetOpcode(RoceOpcode::SLOW_PATH);
+    bth.SetDestinationQp(received.GetConnectionId());
+    bth.SetPacketSequence(packetSequence);
+    packet->AddHeader(bth);
+    RoceSimulationTag tag;
+    tag.SetSourceEndpointId(m_config.endpointId);
+    tag.SetDestinationEndpointId(received.GetSourceEndpointId());
+    tag.SetConnectionId(received.GetConnectionId());
+    ++m_counters.slowPathSignals;
+    SendWirePacket(packet, tag, received.GetConnectionId(), packetSequence, received.GetPathId());
+}
+
+void
+VeRoceTransportAdapter::ProcessSlowPathSignal(uint32_t connectionId, uint32_t pathId)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() || pathId >= connection->second.paths.size())
+    {
+        return;
+    }
+    auto& path = connection->second.paths[pathId];
+    if (path.signalWindowStart.IsZero() ||
+        Simulator::Now() - path.signalWindowStart > m_slowSignalWindow)
+    {
+        path.signalWindowStart = Simulator::Now();
+        path.slowSignals = 0;
+    }
+    if (++path.slowSignals >= m_slowSignalThreshold)
+    {
+        path.slowUntil = std::max(path.slowUntil, Simulator::Now() + m_slowPathHoldDown);
+        path.slowSignals = 0;
+        path.signalWindowStart = Simulator::Now();
+    }
+}
+
 uint64_t
 VeRoceTransportAdapter::ReceiverKey(uint32_t sourceEndpointId, uint32_t connectionId) const
 {
@@ -909,6 +1203,7 @@ VeRoceTransportAdapter::DoDispose()
         for (auto& path : state.paths)
         {
             path.recoveryEvent.Cancel();
+            path.probeEvent.Cancel();
         }
         for (auto& [sequence, pending] : state.pending)
         {

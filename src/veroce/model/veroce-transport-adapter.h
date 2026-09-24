@@ -64,6 +64,12 @@ class VeRoceTransportAdapter : public AiTransportEndpoint
         uint32_t recoveryStage{0};
         Time nextSend{Seconds(0)};
         EventId recoveryEvent;
+        EventId probeEvent;
+        uint64_t smoothedRttNs{0};
+        uint32_t rttSamples{0};
+        uint32_t slowSignals{0};
+        Time signalWindowStart{Seconds(0)};
+        Time slowUntil{Seconds(0)};
     };
 
     struct PendingPacket
@@ -139,11 +145,23 @@ class VeRoceTransportAdapter : public AiTransportEndpoint
                             const ReceiverState& state,
                             bool selective);
     void SendCnp(const RoceSimulationTag& received);
+    void SendPacketDropNak(const RoceSimulationTag& received,
+                           uint32_t packetSequence,
+                           uint32_t messageSequence);
     void ProcessAck(uint32_t connectionId, uint32_t acknowledgedPsn);
     void ProcessSack(uint32_t connectionId, uint32_t acknowledgedPsn, const VeRoceSackHeader& sack);
+    void ProcessPacketDropNak(uint32_t connectionId, uint32_t packetSequence);
     void HandleTimeout(uint32_t connectionId, uint32_t sequence);
     void ProcessCnp(uint32_t connectionId, uint32_t pathId);
     void RecoverPathRate(uint32_t connectionId, uint32_t pathId);
+    void SendRttProbe(uint32_t connectionId, uint32_t pathId);
+    void SendRttResponse(const RoceSimulationTag& received, const VeRoceRttHeader& request);
+    void ProcessRttResponse(uint32_t connectionId,
+                            uint32_t pathId,
+                            const VeRoceRttHeader& response);
+    void SendSlowPathSignal(const RoceSimulationTag& received, uint32_t packetSequence);
+    void ProcessSlowPathSignal(uint32_t connectionId, uint32_t pathId);
+    uint32_t SelectPath(ConnectionState& state);
     RoceOpcode SelectOpcode(AiTransportOperation operation,
                             uint32_t fragment,
                             uint32_t fragments) const;
@@ -168,6 +186,12 @@ class VeRoceTransportAdapter : public AiTransportEndpoint
     uint64_t m_fccAdditiveIncreaseBps{5000000000ULL};
     Time m_fccRecoveryPeriod{MicroSeconds(55)};
     Time m_cnpInterval{MicroSeconds(50)};
+    Time m_rttProbeInterval{MicroSeconds(20)};
+    uint32_t m_slowPacketPsnThreshold{16};
+    uint32_t m_slowSignalThreshold{3};
+    Time m_slowSignalWindow{MicroSeconds(100)};
+    Time m_slowPathHoldDown{MicroSeconds(200)};
+    double m_slowRttFactor{2.0};
     std::unordered_map<uint32_t, Peer> m_peers;
     std::unordered_map<uint32_t, ConnectionState> m_connections;
     std::unordered_map<uint64_t, ReceiverState> m_receivers;
