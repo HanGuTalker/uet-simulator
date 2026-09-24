@@ -1,0 +1,149 @@
+/*
+ * Copyright (c) 2026
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
+
+#ifndef MRC_TRANSPORT_ADAPTER_H
+#define MRC_TRANSPORT_ADAPTER_H
+
+#include "mrc-header.h"
+
+#include "ns3/ai-transport-endpoint.h"
+#include "ns3/event-id.h"
+#include "ns3/roce-simulation-tag.h"
+#include "ns3/roce-v2-header.h"
+
+#include <cstdint>
+#include <deque>
+#include <map>
+#include <set>
+#include <unordered_map>
+#include <vector>
+
+namespace ns3
+{
+
+class Socket;
+
+/** Initial MRC 1.0 Write data path with multipath OOO placement and reliable recovery. */
+class MrcTransportAdapter : public AiTransportEndpoint
+{
+  public:
+    static constexpr uint16_t UDP_PORT = 4971;
+
+    static TypeId GetTypeId();
+    MrcTransportAdapter();
+    ~MrcTransportAdapter() override;
+
+    AiTransportProtocol GetProtocol() const override;
+    AiTransportCapabilities GetCapabilities() const override;
+    bool Initialize(Ptr<Node> node, const AiTransportEndpointConfig& config) override;
+    bool AddPeer(uint32_t endpointId, const Address& address) override;
+    uint32_t OpenConnection(const AiTransportConnectionConfig& config) override;
+    bool Submit(const AiTransportRequest& request) override;
+    uint32_t GetCongestionWindow(uint32_t connectionId) const override;
+    bool SetCongestionWindow(uint32_t connectionId, uint32_t bytes) override;
+    bool SetConnectionRate(uint32_t connectionId, uint64_t rateBps) override;
+    bool ConfigureJobScheduler(uint64_t lineRateBps) override;
+    bool AssignConnectionToJob(uint32_t connectionId, uint32_t jobId, uint32_t weight) override;
+    AiTransportCounters GetCounters() const override;
+
+  private:
+    struct Peer
+    {
+        Address address;
+        uint16_t port{UDP_PORT};
+    };
+
+    struct PathState
+    {
+        uint64_t rateBps{0};
+        Time nextSend{Seconds(0)};
+    };
+
+    struct PendingPacket
+    {
+        Ptr<Packet> payload;
+        RoceSimulationTag tag;
+        MrcOpcode opcode{MrcOpcode::WRITE_ONLY};
+        uint32_t sequence{0};
+        uint16_t messageSequence{0};
+        uint32_t packetOrder{0};
+        uint32_t payloadBytes{0};
+        uint32_t wireBytes{0};
+        uint32_t pathId{0};
+        uint32_t retransmissions{0};
+        bool sent{false};
+        EventId timeout;
+    };
+
+    struct MessageState
+    {
+        uint32_t remainingPackets{0};
+    };
+
+    struct ConnectionState
+    {
+        uint32_t remoteEndpointId{0};
+        uint32_t nextSequence{1};
+        uint32_t nextMessageSequence{1};
+        uint32_t nextPath{0};
+        uint32_t congestionWindow{65536};
+        uint32_t inflightBytes{0};
+        Time retransmissionTimeout{MicroSeconds(50)};
+        std::vector<PathState> paths;
+        std::deque<uint32_t> transmitQueue;
+        std::map<uint32_t, PendingPacket> pending;
+        std::unordered_map<uint64_t, MessageState> messages;
+    };
+
+    struct ReceivedMessage
+    {
+        uint64_t messageId{0};
+        uint32_t totalBytes{0};
+        uint64_t submittedTimeNs{0};
+        uint32_t lastPacketOrder{0};
+        bool lastSeen{false};
+        bool completed{false};
+        std::set<uint32_t> packetOrders;
+    };
+
+    struct ReceiverState
+    {
+        uint32_t cumulativeAck{0};
+        std::set<uint32_t> receivedPsns;
+        std::unordered_map<uint16_t, ReceivedMessage> messages;
+    };
+
+    void DoDispose() override;
+    void Receive(Ptr<Socket> socket);
+    void TryTransmit(uint32_t connectionId);
+    void TransmitSequence(uint32_t connectionId, uint32_t sequence, bool retransmission);
+    bool SendWirePacket(Ptr<Packet> packet,
+                        RoceSimulationTag tag,
+                        uint32_t connectionId,
+                        uint32_t sequence,
+                        uint32_t pathId);
+    void SendTransportAck(const RoceSimulationTag& received, uint32_t cumulativeAck);
+    void ProcessAck(uint32_t connectionId, uint32_t cumulativeAck);
+    void HandleTimeout(uint32_t connectionId, uint32_t sequence);
+    uint64_t ReceiverKey(uint32_t sourceEndpointId, uint32_t connectionId) const;
+    MrcOpcode SelectOpcode(uint32_t fragment, uint32_t fragments) const;
+
+    Ptr<Node> m_node;
+    Ptr<Socket> m_receiveSocket;
+    std::vector<Ptr<Socket>> m_pathSockets;
+    AiTransportEndpointConfig m_config;
+    uint32_t m_nextConnectionId{1};
+    uint32_t m_pathMtu{9000};
+    uint32_t m_pathCount{4};
+    uint32_t m_receiveBitmapLength{4096};
+    std::unordered_map<uint32_t, Peer> m_peers;
+    std::unordered_map<uint32_t, ConnectionState> m_connections;
+    std::unordered_map<uint64_t, ReceiverState> m_receivers;
+    AiTransportCounters m_counters;
+};
+
+} // namespace ns3
+
+#endif // MRC_TRANSPORT_ADAPTER_H

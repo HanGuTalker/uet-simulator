@@ -13,6 +13,7 @@ build_lib_example(
     ${libai-transport}
     ${libroce}
     ${libveroce}
+    ${libmrc}
     ${libuet}
     ${libnetwork}
     ${libinternet}

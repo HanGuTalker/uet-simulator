@@ -54,7 +54,8 @@ RoceBthHeader::Serialize(Buffer::Iterator i) const
     i.WriteU8((m_destinationQp >> 16) & 0xff);
     i.WriteU8((m_destinationQp >> 8) & 0xff);
     i.WriteU8(m_destinationQp & 0xff);
-    i.WriteU8((m_ackRequest ? 0x80 : 0) | (m_retransmission ? 0x40 : 0));
+    i.WriteU8((m_ackRequest ? 0x80 : 0) | (m_retransmission ? 0x40 : 0) |
+              (m_timestampHeader ? 0x20 : 0));
     i.WriteU8((m_packetSequence >> 16) & 0xff);
     i.WriteU8((m_packetSequence >> 8) & 0xff);
     i.WriteU8(m_packetSequence & 0xff);
@@ -74,6 +75,7 @@ RoceBthHeader::Deserialize(Buffer::Iterator i)
     const uint8_t ackFlags = i.ReadU8();
     m_ackRequest = (ackFlags & 0x80) != 0;
     m_retransmission = (ackFlags & 0x40) != 0;
+    m_timestampHeader = (ackFlags & 0x20) != 0;
     m_packetSequence = (static_cast<uint32_t>(i.ReadU8()) << 16) |
                        (static_cast<uint32_t>(i.ReadU8()) << 8) | i.ReadU8();
     return SERIALIZED_SIZE;
@@ -84,7 +86,7 @@ RoceBthHeader::Print(std::ostream& os) const
 {
     os << "opcode=0x" << std::hex << +static_cast<uint8_t>(m_opcode) << std::dec
        << " dqpn=" << m_destinationQp << " psn=" << m_packetSequence << " ack=" << m_ackRequest
-       << " retrans=" << m_retransmission;
+       << " retrans=" << m_retransmission << " tseth=" << m_timestampHeader;
 }
 
 #define ROCE_ACCESSOR(Class, Name, Type, Member)                                                   \
@@ -137,6 +139,18 @@ bool
 RoceBthHeader::IsRetransmission() const
 {
     return m_retransmission;
+}
+
+void
+RoceBthHeader::SetTimestampHeader(bool value)
+{
+    m_timestampHeader = value;
+}
+
+bool
+RoceBthHeader::HasTimestampHeader() const
+{
+    return m_timestampHeader;
 }
 
 TypeId

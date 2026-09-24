@@ -68,6 +68,8 @@ class RoceBthHeader : public Header
     bool IsAckRequested() const;
     void SetRetransmission(bool value);
     bool IsRetransmission() const;
+    void SetTimestampHeader(bool value);
+    bool HasTimestampHeader() const;
     void SetPacketSequence(uint32_t value);
     uint32_t GetPacketSequence() const;
 
@@ -79,6 +81,7 @@ class RoceBthHeader : public Header
     uint32_t m_destinationQp{0};
     bool m_ackRequest{false};
     bool m_retransmission{false};
+    bool m_timestampHeader{false};
     uint32_t m_packetSequence{0};
 };
 

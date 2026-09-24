@@ -56,10 +56,11 @@ configuration, connection and message requests into the existing RUD data path a
 trace events to the common trace surface. The adapter reports packet spraying and per-path
 congestion control as unsupported because the frozen UEC sender still assigns `pathId=0`.
 
-The workload entry point accepts `--transport=uec`, `--transport=rocev2` and `--transport=veroce`.
+The workload entry point accepts `--transport=uec`, `--transport=rocev2`, `--transport=veroce` and
+`--transport=mrc`.
 Its `--operation=message|send|write|read` switch selects the common verb; RDMA Read is currently
 accepted only by the veRoCE adapter and completes at the requesting endpoint.
-Names for MRC, Falcon and MetaRoCE are parsed now. Until the corresponding adapter is registered,
+Names for Falcon and MetaRoCE are parsed now. Until the corresponding adapter is registered,
 selecting one fails explicitly and never falls back to another protocol.
 
 ## Adapter requirements
@@ -79,10 +80,8 @@ The implementation registry is recorded in `requirements/transport-catalog.json`
 
 ## Current verification
 
-The optimized common module, UEC adapter and migrated workload entry point compile successfully.
-A two-node, one-message UEC smoke run completed one of one messages and emitted a JSON summary with
-`protocol: uec`. A request for `transport=mrc` was recognized and rejected because no MRC adapter is
-registered yet. The RoCEv2 module is registered as the conventional RC/DCQCN baseline; its exact
+The optimized common module and registered UEC, RoCEv2, veRoCE and MRC adapters compile
+successfully. The RoCEv2 module is registered as the conventional RC/DCQCN baseline; its exact
 scope and limitations are documented in `docs/transport/rocev2-model.md`.
 
 The veRoCE module registers a P2-oriented data-plane adapter with a P3 Read path on UDP port 4794.
@@ -90,3 +89,8 @@ It implements actual veRoCE extension-header serialization, out-of-order DDP acc
 SACK/selective recovery, UDP source-port packet spreading, path-wise FCC and independent reliable
 Read response state. Its supported and deferred protocol functions are documented in
 `docs/transport/veroce-model.md`.
+
+The MRC module registers the first comparison milestone: the MRC 1.0 Write wire layout, packet
+spraying over multiple UDP entropy paths, out-of-order direct-placement accounting, cumulative
+transport ACKs and timeout recovery. Its implemented and deferred functions are documented in
+`docs/transport/mrc-model.md`.

@@ -7,6 +7,7 @@
 #include "ns3/core-module.h"
 #include "ns3/csma-module.h"
 #include "ns3/internet-module.h"
+#include "ns3/mrc-module.h"
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
 #include "ns3/roce-module.h"
@@ -292,6 +293,7 @@ class AiWorkload
         transportFactory.Register(AiTransportProtocol::UEC, UetTransportAdapter::GetTypeId());
         transportFactory.Register(AiTransportProtocol::ROCEV2, RoceV2TransportAdapter::GetTypeId());
         transportFactory.Register(AiTransportProtocol::VEROCE, VeRoceTransportAdapter::GetTypeId());
+        transportFactory.Register(AiTransportProtocol::MRC, MrcTransportAdapter::GetTypeId());
         if (protocol == AiTransportProtocol::UNKNOWN || !transportFactory.IsRegistered(protocol))
         {
             std::cerr << "Transport '" << transportName
