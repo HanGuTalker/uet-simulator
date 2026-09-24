@@ -1,5 +1,13 @@
 # veRoCE model scope
 
+## Project status
+
+The veRoCE comparison model is **scope-complete and frozen**. Its target scope is the P2 data plane
+plus the P3 RDMA Read path described below. Atomic, Write-with-Immediate, SRQ, UD and CM/profile
+negotiation are intentionally outside the comparison scope; they are not future completion gates.
+This status means the model is ready for controlled protocol-comparison experiments, not that it is
+a fully conformant P3 endpoint.
+
 ## Normative basis
 
 The model follows *ByteDance veRoCE Transport Protocol*, version 2.0.4, dated 18 December
@@ -38,10 +46,10 @@ shared from the `roce` module; veRoCE extensions remain in the `veroce` module.
 
 This is a runnable P2 data-plane implementation with the P3 RDMA Read path, not a claim of full
 veRoCE 2.0.4 conformance. Atomic, Write-with-Immediate, shared receive queues, CM/profile
-negotiation and the remaining P0/P1/P3 behavior remain separate milestones. The simulated endpoint
-ICRC protects the transport image; ns-3 owns the outer IP/UDP serialization, so mutable outer fields
-are not copied into the endpoint's CRC calculation. The trimming queue recalculates the shortened
-transport ICRC and outer packet lengths.
+negotiation and the remaining P0/P1/P3 behavior are deliberately out of scope. The simulated
+endpoint ICRC protects the transport image; ns-3 owns the outer IP/UDP serialization, so mutable
+outer fields are not copied into the endpoint's CRC calculation. The trimming queue recalculates
+the shortened transport ICRC and outer packet lengths.
 
 The comparison framework reports only implemented capabilities. In particular,
 `reliableOrdered=false` and `jobScheduling=false` until those behaviors exist and have targeted
