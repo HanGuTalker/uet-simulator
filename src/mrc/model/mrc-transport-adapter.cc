@@ -45,6 +45,11 @@ MrcTransportAdapter::GetTypeId()
                           UintegerValue(4096),
                           MakeUintegerAccessor(&MrcTransportAdapter::m_receiveBitmapLength),
                           MakeUintegerChecker<uint32_t>(128, 32640))
+            .AddAttribute("MaxWriteImmediateInflight",
+                          "Maximum incomplete WriteIMM immediate values stashed per responder QP.",
+                          UintegerValue(64),
+                          MakeUintegerAccessor(&MrcTransportAdapter::m_maxWriteImmediateInflight),
+                          MakeUintegerChecker<uint32_t>(1, 65535))
             .AddAttribute("TestDropDataSequenceOnce",
                           "Fault-injection PSN dropped once at each responder; zero disables it.",
                           UintegerValue(0),
@@ -69,6 +74,7 @@ MrcTransportAdapter::GetCapabilities() const
     capabilities.reliableUnordered = true;
     capabilities.selectiveAcknowledgment = true;
     capabilities.packetSpraying = true;
+    capabilities.endpointTrimming = true;
     return capabilities;
 }
 
@@ -153,17 +159,21 @@ MrcTransportAdapter::OpenConnection(const AiTransportConnectionConfig& config)
 }
 
 MrcOpcode
-MrcTransportAdapter::SelectOpcode(uint32_t fragment, uint32_t fragments) const
+MrcTransportAdapter::SelectOpcode(uint32_t fragment, uint32_t fragments, bool writeImmediate) const
 {
     if (fragments == 1)
     {
-        return MrcOpcode::WRITE_ONLY;
+        return writeImmediate ? MrcOpcode::WRITE_ONLY_IMMEDIATE : MrcOpcode::WRITE_ONLY;
     }
     if (fragment == 0)
     {
         return MrcOpcode::WRITE_FIRST;
     }
-    return fragment + 1 == fragments ? MrcOpcode::WRITE_LAST : MrcOpcode::WRITE_MIDDLE;
+    if (fragment + 1 == fragments)
+    {
+        return writeImmediate ? MrcOpcode::WRITE_LAST_IMMEDIATE : MrcOpcode::WRITE_LAST;
+    }
+    return MrcOpcode::WRITE_MIDDLE;
 }
 
 bool
@@ -174,7 +184,8 @@ MrcTransportAdapter::Submit(const AiTransportRequest& request)
         request.remoteEndpointId != connection->second.remoteEndpointId ||
         request.reliability != AiTransportReliability::RELIABLE_UNORDERED ||
         (request.operation != AiTransportOperation::MESSAGE &&
-         request.operation != AiTransportOperation::WRITE))
+         request.operation != AiTransportOperation::WRITE &&
+         request.operation != AiTransportOperation::WRITE_IMMEDIATE))
     {
         return false;
     }
@@ -186,11 +197,15 @@ MrcTransportAdapter::Submit(const AiTransportRequest& request)
     const uint32_t totalBytes = request.payload->GetSize();
     const uint32_t fragments =
         (totalBytes + m_config.payloadMtuBytes - 1) / m_config.payloadMtuBytes;
-    if (state.nextSequence + fragments > 0xffffff || state.nextMessageSequence > 0xffff)
+    const bool writeImmediate = request.operation == AiTransportOperation::WRITE_IMMEDIATE;
+    if (state.nextSequence + fragments > 0xffffff || state.nextMessageSequence > 0xffff ||
+        (writeImmediate && state.nextReceiveQueueMessageSequence > 0xffff))
     {
         return false;
     }
     const uint16_t msn = static_cast<uint16_t>(state.nextMessageSequence++);
+    const uint16_t rqmsn =
+        writeImmediate ? static_cast<uint16_t>(state.nextReceiveQueueMessageSequence++) : 0;
     state.messages.emplace(request.messageId, MessageState{fragments});
     uint32_t offset = 0;
     for (uint32_t fragment = 0; fragment < fragments; ++fragment)
@@ -198,15 +213,19 @@ MrcTransportAdapter::Submit(const AiTransportRequest& request)
         const uint32_t bytes = std::min(m_config.payloadMtuBytes, totalBytes - offset);
         PendingPacket pending;
         pending.payload = request.payload->CreateFragment(offset, bytes);
-        pending.opcode = SelectOpcode(fragment, fragments);
+        pending.opcode = SelectOpcode(fragment, fragments, writeImmediate);
         pending.sequence = state.nextSequence++;
         pending.messageSequence = msn;
+        pending.receiveQueueMessageSequence = rqmsn;
         pending.packetOrder = fragment;
+        pending.immediateData = static_cast<uint32_t>(request.messageId);
         pending.payloadBytes = bytes;
-        pending.wireBytes = bytes + RoceBthHeader::SERIALIZED_SIZE +
-                            MrcMethHeader::SERIALIZED_SIZE + MrcTimestampHeader::SERIALIZED_SIZE +
-                            RoceRethHeader::SERIALIZED_SIZE +
-                            RoceInvariantCrcTrailer::SERIALIZED_SIZE;
+        pending.wireBytes =
+            bytes + RoceBthHeader::SERIALIZED_SIZE + MrcMethHeader::SERIALIZED_SIZE +
+            MrcTimestampHeader::SERIALIZED_SIZE + RoceRethHeader::SERIALIZED_SIZE +
+            ((writeImmediate && fragment + 1 == fragments) ? MrcImmediateHeader::SERIALIZED_SIZE
+                                                           : 0) +
+            RoceInvariantCrcTrailer::SERIALIZED_SIZE;
         pending.tag.SetSourceEndpointId(m_config.endpointId);
         pending.tag.SetDestinationEndpointId(request.remoteEndpointId);
         pending.tag.SetConnectionId(request.connectionId);
@@ -345,6 +364,13 @@ MrcTransportAdapter::TransmitSequence(uint32_t connectionId, uint32_t sequence, 
         pending->second.pathId = connection->second.nextPath++ % connection->second.paths.size();
     }
     Ptr<Packet> packet = pending->second.payload->Copy();
+    if (pending->second.opcode == MrcOpcode::WRITE_LAST_IMMEDIATE ||
+        pending->second.opcode == MrcOpcode::WRITE_ONLY_IMMEDIATE)
+    {
+        MrcImmediateHeader immediate;
+        immediate.SetImmediateData(pending->second.immediateData);
+        packet->AddHeader(immediate);
+    }
     RoceRethHeader reth;
     reth.SetVirtualAddress(pending->second.tag.GetMessageId() +
                            pending->second.packetOrder * m_config.payloadMtuBytes);
@@ -355,6 +381,7 @@ MrcTransportAdapter::TransmitSequence(uint32_t connectionId, uint32_t sequence, 
     tseth.SetTimestamp(static_cast<uint16_t>((Simulator::Now().GetNanoSeconds() / 128) & 0xffff));
     packet->AddHeader(tseth);
     MrcMethHeader meth;
+    meth.SetReceiveQueueMessageSequence(pending->second.receiveQueueMessageSequence);
     meth.SetMessageSequence(pending->second.messageSequence);
     packet->AddHeader(meth);
     RoceBthHeader bth;
@@ -428,8 +455,9 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
     {
         RoceSimulationTag tag;
         SocketIpTosTag tos;
-        const bool congestionExperienced =
-            packet->PeekPacketTag(tos) && (tos.GetTos() & 0x03) == 0x03;
+        const bool hasTos = packet->PeekPacketTag(tos);
+        const bool congestionExperienced = hasTos && (tos.GetTos() & 0x03) == 0x03;
+        const bool trimmed = hasTos && (tos.GetTos() >> 2) == 9;
         if (!packet->PeekPacketTag(tag) ||
             packet->GetSize() <
                 RoceBthHeader::SERIALIZED_SIZE + RoceInvariantCrcTrailer::SERIALIZED_SIZE)
@@ -460,7 +488,29 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
             MrcTimestampHeader tseth;
             RoceRethHeader reth;
             if (packet->RemoveHeader(meth) == 0 || !bth.HasTimestampHeader() ||
-                packet->RemoveHeader(tseth) == 0 || packet->RemoveHeader(reth) == 0)
+                packet->RemoveHeader(tseth) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            if (trimmed)
+            {
+                NotifyPacketTrimmed(wireImage, tag.GetConnectionId(), tag.GetPathId());
+                SendReliabilityNack(tag,
+                                    bth.GetPacketSequence(),
+                                    tseth.GetTimestamp(),
+                                    MrcNackReason::TRIMMED);
+                continue;
+            }
+            if (packet->RemoveHeader(reth) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            const bool writeImmediate = opcode == MrcOpcode::WRITE_LAST_IMMEDIATE ||
+                                        opcode == MrcOpcode::WRITE_ONLY_IMMEDIATE;
+            MrcImmediateHeader immediate;
+            if (writeImmediate && packet->RemoveHeader(immediate) == 0)
             {
                 ++m_counters.integrityDrops;
                 continue;
@@ -482,6 +532,18 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
                                     MrcNackReason::PSN_OUT_OF_RANGE);
                 continue;
             }
+            const auto existingMessage = state.messages.find(meth.GetMessageSequence());
+            if (writeImmediate &&
+                (existingMessage == state.messages.end() ||
+                 !existingMessage->second.immediateDataSeen) &&
+                state.stashedImmediateValues >= m_maxWriteImmediateInflight)
+            {
+                SendReliabilityNack(tag,
+                                    sequence,
+                                    tseth.GetTimestamp(),
+                                    MrcNackReason::NO_RESOURCE);
+                continue;
+            }
             bool newPacket = false;
             if (sequence > state.cumulativeAck)
             {
@@ -499,6 +561,13 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
                     message.totalBytes = tag.GetTotalMessageBytes();
                     message.submittedTimeNs = tag.GetSubmittedTimeNs();
                 }
+                if (writeImmediate && !message.immediateDataSeen)
+                {
+                    message.writeImmediate = true;
+                    message.immediateDataSeen = true;
+                    message.immediateData = immediate.GetImmediateData();
+                    ++state.stashedImmediateValues;
+                }
                 const uint64_t baseAddress = tag.GetMessageId();
                 const uint32_t packetOrder =
                     reth.GetVirtualAddress() >= baseAddress
@@ -511,14 +580,29 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
                     message.lastSeen = true;
                     message.lastPacketOrder = packetOrder;
                 }
-                if (!message.completed && message.lastSeen &&
+                if (!message.placementComplete && message.lastSeen &&
                     message.packetOrders.size() == static_cast<size_t>(message.lastPacketOrder + 1))
                 {
-                    message.completed = true;
+                    message.placementComplete = true;
+                }
+                while (true)
+                {
+                    auto completed = state.messages.find(state.nextCompletionMsn);
+                    if (completed == state.messages.end() || !completed->second.placementComplete)
+                    {
+                        break;
+                    }
                     NotifyMessageComplete(tag.GetConnectionId(),
-                                          message.messageId,
-                                          message.totalBytes,
-                                          Simulator::Now() - NanoSeconds(message.submittedTimeNs));
+                                          completed->second.messageId,
+                                          completed->second.totalBytes,
+                                          Simulator::Now() -
+                                              NanoSeconds(completed->second.submittedTimeNs));
+                    if (completed->second.immediateDataSeen && state.stashedImmediateValues > 0)
+                    {
+                        --state.stashedImmediateValues;
+                    }
+                    state.messages.erase(completed);
+                    ++state.nextCompletionMsn;
                 }
             }
             while (state.receivedPsns.erase(state.cumulativeAck + 1) > 0)

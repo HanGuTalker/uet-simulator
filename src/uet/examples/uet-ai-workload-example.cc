@@ -72,10 +72,11 @@ class AiWorkload
         m_payloadBytes = payloadBytes;
         m_transportName = transportName;
         m_operationName = operationName;
-        m_operation = operationName == "send"    ? AiTransportOperation::SEND
-                      : operationName == "write" ? AiTransportOperation::WRITE
-                      : operationName == "read"  ? AiTransportOperation::READ
-                                                 : AiTransportOperation::MESSAGE;
+        m_operation = operationName == "send"        ? AiTransportOperation::SEND
+                      : operationName == "write"     ? AiTransportOperation::WRITE
+                      : operationName == "write-imm" ? AiTransportOperation::WRITE_IMMEDIATE
+                      : operationName == "read"      ? AiTransportOperation::READ
+                                                     : AiTransportOperation::MESSAGE;
         m_pattern = pattern;
         m_ringInterleaved = ringInterleaved;
         m_fabricType = fabricType;
@@ -1369,7 +1370,7 @@ main(int argc, char* argv[])
                      "Bytes per message, or tensor bytes per AllReduce rank",
                      payloadBytes);
     command.AddValue("transport", "uec, veroce, mrc, falcon, metaroce, or rocev2", transport);
-    command.AddValue("operation", "message, send, write, or read", operation);
+    command.AddValue("operation", "message, send, write, write-imm, or read", operation);
     command.AddValue("pattern", "single, incast, all-to-all, or ring-allreduce", pattern);
     command.AddValue("ringInterleaved",
                      "Alternate first-half and second-half ranks in the AllReduce ring",
@@ -1414,7 +1415,7 @@ main(int argc, char* argv[])
                      "Install RED/ECN on the switched receiver-facing link",
                      enableEcn);
     command.AddValue("enableTrimming",
-                     "Install the veRoCE ECN/packet-trimming queue discipline",
+                     "Install the veRoCE/MRC ECN and packet-trimming queue discipline",
                      enableTrimming);
     command.AddValue("ecnMinBytes", "RED minimum ECN threshold in bytes", ecnMinBytes);
     command.AddValue("ecnMaxBytes", "RED maximum ECN threshold in bytes", ecnMaxBytes);
@@ -1426,9 +1427,11 @@ main(int argc, char* argv[])
     if (nodes < 2 || nodes > 250 || messages == 0 ||
         ParseAiTransportProtocol(transport) == AiTransportProtocol::UNKNOWN ||
         (operation != "message" && operation != "send" && operation != "write" &&
-         operation != "read") ||
+         operation != "write-imm" && operation != "read") ||
         (operation == "read" &&
          ParseAiTransportProtocol(transport) != AiTransportProtocol::VEROCE) ||
+        (operation == "write-imm" &&
+         ParseAiTransportProtocol(transport) != AiTransportProtocol::MRC) ||
         (pattern != "single" && pattern != "incast" && pattern != "all-to-all" &&
          pattern != "ring-allreduce") ||
         (pattern == "ring-allreduce" && payloadBytes % nodes != 0) ||
@@ -1446,7 +1449,8 @@ main(int argc, char* argv[])
         ((enableEcn || enableTrimming) &&
          (fabric == "csma" || ecnMinBytes == 0 || ecnMinBytes >= ecnMaxBytes ||
           ecnMaxBytes >= ecnQueueLimitBytes)) ||
-        (enableTrimming && ParseAiTransportProtocol(transport) != AiTransportProtocol::VEROCE) ||
+        (enableTrimming && ParseAiTransportProtocol(transport) != AiTransportProtocol::VEROCE &&
+         ParseAiTransportProtocol(transport) != AiTransportProtocol::MRC) ||
         (warmupBytes > 0 && (!reusePdc || measurementStartUs == 0)))
     {
         return 2;

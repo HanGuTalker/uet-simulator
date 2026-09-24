@@ -3,9 +3,9 @@
 ## Project status
 
 The MRC adapter is available as a functional comparison subset. It implements the standard Write
-data path, packet spreading, out-of-order receive placement, the MRC reliability control path and
-SACK-clocked NSCC. It is not a full MRC endpoint because Write-with-Immediate, endpoint operations,
-trimming and the complete verbs/resource model remain deferred.
+and Write-with-Immediate data paths, packet spreading, out-of-order receive placement, packet
+trimming, the MRC reliability control path and SACK-clocked NSCC. It is not a full MRC endpoint
+because endpoint operations and the complete verbs/resource model remain deferred.
 
 ## Normative basis
 
@@ -17,8 +17,12 @@ MRC-specific headers and state remain in the `mrc` module.
 ## Implemented core
 
 - RDMA Write packetization. The common `MESSAGE` operation maps to MRC Write.
-- MRC Write First, Middle, Last and Only opcodes.
-- The four-byte Message Extended Transport Header (METH), carrying RQMSN and MSN.
+- MRC Write First, Middle, Last and Only opcodes, plus Write Last/Only with Immediate opcodes.
+- The four-byte Message Extended Transport Header (METH), carrying MSN on every request and a
+  separately allocated RQMSN for Write-with-Immediate operations.
+- A four-byte Immediate Data field after RETH on Write Last/Only with Immediate packets. The common
+  API maps the low 32 bits of `messageId` to Immediate Data because it has no explicit immediate
+  operand.
 - The four-byte requester timestamp header (TSETH), including timestamp-resolution and format-type
   fields, and the BTH indication that TSETH is present.
 - RETH on every Write packet. The virtual address advances by payload MTU while the remote key and
@@ -27,7 +31,9 @@ MRC-specific headers and state remain in the `mrc` module.
 - Packet spreading over four independently bound UDP source ports by default. Round-robin path
   selection is explicit and exported through the common `PathSelected` trace.
 - Responder out-of-order PSN tracking and direct-placement accounting by RETH virtual address.
-- Receiver completion only after every packet order through the Last/Only packet has arrived.
+- Receiver completion only after every packet order through the Last/Only packet has arrived, with
+  completions released in MSN order. Immediate values are stashed until completion and bounded by
+  the configurable `MaxWriteImmediateInflight` responder-QP limit.
 - Cumulative semantic Transport ACK packets, kept logically independent from Reliability SACKs.
 - Serialized 28-byte SETH plus eight-byte CC_STATE, including the cumulative PSN, triggering PSN
   offset, reflected entropy, QP/PDC identifiers, maximum PSN range, 64-bit selective bitmap,
@@ -37,6 +43,9 @@ MRC-specific headers and state remain in the `mrc` module.
   and at-most-once selective fast retransmission of inferred holes.
 - Retriable NACK processing, reliability-probe request/response, per-packet retransmission timers
   and retransmission on a different entropy path.
+- DSCP-9 trimmed-packet recognition before payload parsing, a common `PacketTrimmed` trace,
+  Reliability NACK with reason `TRIMMED`, and sender fast retransmission on a different path. The
+  shared switched-fabric trim queue preserves the headers needed to identify the affected PSN.
 - Per-QP, sender-side, SACK-clocked NSCC. Reflected 128 ns timestamps provide RTT samples, SETH `m`
   carries ECN feedback, and the controller applies fair additive increase, bounded multiplicative
   decrease and a one-nominal-packet minimum window.
@@ -48,9 +57,8 @@ a simulation mapping and is not presented as a verbs API.
 
 ## Deferred MRC functions
 
-- Write-with-Immediate and receiver notification semantics.
 - Endpoint discovery request/response and negotiated connection parameters.
-- Packet trimming and path-health feedback.
+- Endpoint visibility, event delivery and port/path-health state machines.
 - Memory registration/protection enforcement and complete verbs queue semantics.
 - Full QP error-state transitions for non-retriable NACKs and retry exhaustion.
 
@@ -73,5 +81,10 @@ regression suite:
   one-packet floor and then through additive recovery. Aggregate goodput was 257.119 Gbit/s.
 - two-node 1 MiB Write with the final PSN deliberately dropped: 1/1 completed after one RTO, one
   PETH probe and one retransmission; the probe response added one SETH without corrupting state.
+- two-node four-message 256 KiB Write-with-Immediate: 4/4 completed in MSN order, with 18.428 us
+  mean latency, 106.959 Gbit/s aggregate goodput and no recovery event; and
+- four-node 1 MiB Incast with a 32 KiB trim queue: 3/3 completed while 25 trimmed packets generated
+  25 `TRIMMED` NACKs and 25 fast retransmissions, with zero timeout and zero queue drop. Aggregate
+  goodput was 58.077 Gbit/s and mean latency was 152.310 us.
 
 These runs are functional smoke checks. They are not tuned performance comparisons.

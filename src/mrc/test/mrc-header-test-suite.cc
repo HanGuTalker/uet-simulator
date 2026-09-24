@@ -20,6 +20,17 @@ class MrcReliabilityHeaderTestCase : public TestCase
   private:
     void DoRun() override
     {
+        MrcImmediateHeader immediate;
+        immediate.SetImmediateData(0xdeadbeef);
+        Ptr<Packet> packet = Create<Packet>();
+        packet->AddHeader(immediate);
+        NS_TEST_EXPECT_MSG_EQ(packet->GetSize(), 4, "Immediate Data wire size changed");
+        MrcImmediateHeader decodedImmediate;
+        packet->RemoveHeader(decodedImmediate);
+        NS_TEST_EXPECT_MSG_EQ(decodedImmediate.GetImmediateData(),
+                              0xdeadbeef,
+                              "Immediate Data changed");
+
         MrcCcStateHeader cc;
         cc.SetTimestamp(0x1234);
         cc.SetOutOfOrderCount(0x2345);
@@ -38,7 +49,7 @@ class MrcReliabilityHeaderTestCase : public TestCase
         sack.SetMaximumPsnRange(32);
         sack.SetSackOffset(7);
         sack.SetBitmap(0x8040201008040201ULL);
-        Ptr<Packet> packet = Create<Packet>();
+        packet = Create<Packet>();
         packet->AddHeader(cc);
         packet->AddHeader(sack);
         NS_TEST_EXPECT_MSG_EQ(packet->GetSize(), 36, "SETH plus CC_STATE wire size changed");

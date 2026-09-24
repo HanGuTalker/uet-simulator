@@ -64,6 +64,26 @@ class MrcMethHeader : public Header
     uint16_t m_messageSequence{0};
 };
 
+/** Four-byte Immediate Data field carried by Last/Only WriteIMM packets. */
+class MrcImmediateHeader : public Header
+{
+  public:
+    static constexpr uint32_t SERIALIZED_SIZE = 4;
+
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
+
+    void SetImmediateData(uint32_t value);
+    uint32_t GetImmediateData() const;
+
+  private:
+    uint32_t m_immediateData{0};
+};
+
 /** Four-byte MRC Requestor Timestamp Extended Header. */
 class MrcTimestampHeader : public Header
 {

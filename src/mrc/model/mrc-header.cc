@@ -11,6 +11,7 @@ namespace ns3
 {
 
 NS_OBJECT_ENSURE_REGISTERED(MrcMethHeader);
+NS_OBJECT_ENSURE_REGISTERED(MrcImmediateHeader);
 NS_OBJECT_ENSURE_REGISTERED(MrcTimestampHeader);
 NS_OBJECT_ENSURE_REGISTERED(MrcCcStateHeader);
 NS_OBJECT_ENSURE_REGISTERED(MrcSethHeader);
@@ -82,6 +83,59 @@ uint16_t
 MrcMethHeader::GetMessageSequence() const
 {
     return m_messageSequence;
+}
+
+TypeId
+MrcImmediateHeader::GetTypeId()
+{
+    static TypeId tid = TypeId("ns3::MrcImmediateHeader")
+                            .SetParent<Header>()
+                            .SetGroupName("Mrc")
+                            .AddConstructor<MrcImmediateHeader>();
+    return tid;
+}
+
+TypeId
+MrcImmediateHeader::GetInstanceTypeId() const
+{
+    return GetTypeId();
+}
+
+uint32_t
+MrcImmediateHeader::GetSerializedSize() const
+{
+    return SERIALIZED_SIZE;
+}
+
+void
+MrcImmediateHeader::Serialize(Buffer::Iterator i) const
+{
+    i.WriteHtonU32(m_immediateData);
+}
+
+uint32_t
+MrcImmediateHeader::Deserialize(Buffer::Iterator i)
+{
+    m_immediateData = i.ReadNtohU32();
+    return SERIALIZED_SIZE;
+}
+
+void
+MrcImmediateHeader::Print(std::ostream& os) const
+{
+    os << "immediate=0x" << std::hex << m_immediateData << std::dec;
+}
+
+void
+MrcImmediateHeader::SetImmediateData(uint32_t value)
+{
+    m_immediateData = value;
+}
+
+uint32_t
+MrcImmediateHeader::GetImmediateData() const
+{
+    return m_immediateData;
 }
 
 TypeId

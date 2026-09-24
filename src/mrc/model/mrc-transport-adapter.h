@@ -69,7 +69,9 @@ class MrcTransportAdapter : public AiTransportEndpoint
         MrcOpcode opcode{MrcOpcode::WRITE_ONLY};
         uint32_t sequence{0};
         uint16_t messageSequence{0};
+        uint16_t receiveQueueMessageSequence{0};
         uint32_t packetOrder{0};
+        uint32_t immediateData{0};
         uint32_t payloadBytes{0};
         uint32_t wireBytes{0};
         uint32_t pathId{0};
@@ -90,6 +92,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
         uint32_t remoteEndpointId{0};
         uint32_t nextSequence{1};
         uint32_t nextMessageSequence{1};
+        uint32_t nextReceiveQueueMessageSequence{1};
         uint32_t nextPath{0};
         uint32_t congestionWindow{65536};
         uint32_t inflightBytes{0};
@@ -108,8 +111,11 @@ class MrcTransportAdapter : public AiTransportEndpoint
         uint32_t totalBytes{0};
         uint64_t submittedTimeNs{0};
         uint32_t lastPacketOrder{0};
+        uint32_t immediateData{0};
+        bool writeImmediate{false};
+        bool immediateDataSeen{false};
         bool lastSeen{false};
-        bool completed{false};
+        bool placementComplete{false};
         std::set<uint32_t> packetOrders;
     };
 
@@ -118,6 +124,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
         uint32_t cumulativeAck{0};
         uint32_t highestPsn{0};
         uint64_t receivedBytes{0};
+        uint16_t nextCompletionMsn{1};
+        uint32_t stashedImmediateValues{0};
         std::set<uint32_t> receivedPsns;
         std::unordered_map<uint16_t, ReceivedMessage> messages;
     };
@@ -152,7 +160,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
     void MarkReliabilityAcknowledged(ConnectionState& state, uint32_t sequence);
     void HandleTimeout(uint32_t connectionId, uint32_t sequence);
     uint64_t ReceiverKey(uint32_t sourceEndpointId, uint32_t connectionId) const;
-    MrcOpcode SelectOpcode(uint32_t fragment, uint32_t fragments) const;
+    MrcOpcode SelectOpcode(uint32_t fragment, uint32_t fragments, bool writeImmediate) const;
 
     Ptr<Node> m_node;
     Ptr<Socket> m_receiveSocket;
@@ -162,6 +170,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
     uint32_t m_pathMtu{9000};
     uint32_t m_pathCount{4};
     uint32_t m_receiveBitmapLength{4096};
+    uint32_t m_maxWriteImmediateInflight{64};
     uint32_t m_testDropDataSequenceOnce{0};
     bool m_testDropConsumed{false};
     std::unordered_map<uint32_t, Peer> m_peers;

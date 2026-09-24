@@ -58,8 +58,8 @@ congestion control as unsupported because the frozen UEC sender still assigns `p
 
 The workload entry point accepts `--transport=uec`, `--transport=rocev2`, `--transport=veroce` and
 `--transport=mrc`.
-Its `--operation=message|send|write|read` switch selects the common verb; RDMA Read is currently
-accepted only by the veRoCE adapter and completes at the requesting endpoint.
+Its `--operation=message|send|write|write-imm|read` switch selects the common verb; RDMA Read is
+currently accepted only by the veRoCE adapter and Write-with-Immediate only by MRC.
 Names for Falcon and MetaRoCE are parsed now. Until the corresponding adapter is registered,
 selecting one fails explicitly and never falls back to another protocol.
 
@@ -90,7 +90,8 @@ SACK/selective recovery, UDP source-port packet spreading, path-wise FCC and ind
 Read response state. Its supported and deferred protocol functions are documented in
 `docs/transport/veroce-model.md`.
 
-The MRC module registers a comparison subset with the MRC 1.0 Write wire layout, packet spraying,
-out-of-order direct placement, independent semantic ACK and Reliability SACK/NACK processing,
-reliability probes, selective recovery and SACK-clocked NSCC. Its implemented and deferred
-functions are documented in `docs/transport/mrc-model.md`.
+The MRC module registers a comparison subset with the MRC 1.0 Write and Write-with-Immediate wire
+layouts, packet spraying, out-of-order direct placement, ordered completion, independent semantic
+ACK and Reliability SACK/NACK processing, reliability probes, selective recovery, endpoint
+trimming recovery and SACK-clocked NSCC. Its implemented and deferred functions are documented in
+`docs/transport/mrc-model.md`.
