@@ -14,6 +14,7 @@
 #include "ns3/uinteger.h"
 
 #include <algorithm>
+#include <climits>
 #include <utility>
 
 namespace ns3
@@ -43,7 +44,12 @@ MrcTransportAdapter::GetTypeId()
                           "Number of out-of-order PSNs tracked at the responder.",
                           UintegerValue(4096),
                           MakeUintegerAccessor(&MrcTransportAdapter::m_receiveBitmapLength),
-                          MakeUintegerChecker<uint32_t>(128, 32640));
+                          MakeUintegerChecker<uint32_t>(128, 32640))
+            .AddAttribute("TestDropDataSequenceOnce",
+                          "Fault-injection PSN dropped once at each responder; zero disables it.",
+                          UintegerValue(0),
+                          MakeUintegerAccessor(&MrcTransportAdapter::m_testDropDataSequenceOnce),
+                          MakeUintegerChecker<uint32_t>(0, 0xffffff));
     return tid;
 }
 
@@ -61,6 +67,7 @@ MrcTransportAdapter::GetCapabilities() const
 {
     AiTransportCapabilities capabilities;
     capabilities.reliableUnordered = true;
+    capabilities.selectiveAcknowledgment = true;
     capabilities.packetSpraying = true;
     return capabilities;
 }
@@ -136,6 +143,11 @@ MrcTransportAdapter::OpenConnection(const AiTransportConnectionConfig& config)
     {
         path.rateBps = pathRate;
     }
+    state.nscc.Initialize(m_config.payloadMtuBytes,
+                          state.congestionWindow,
+                          m_config.maximumWindowBytes,
+                          m_config.baseRtt,
+                          m_config.targetQueueDelay);
     m_connections.emplace(connectionId, std::move(state));
     return connectionId;
 }
@@ -227,7 +239,8 @@ MrcTransportAdapter::SetCongestionWindow(uint32_t connectionId, uint32_t bytes)
         return false;
     }
     const uint32_t oldBytes = connection->second.congestionWindow;
-    connection->second.congestionWindow = bytes;
+    connection->second.nscc.SetCongestionWindow(bytes);
+    connection->second.congestionWindow = connection->second.nscc.GetCongestionWindow();
     if (oldBytes != bytes)
     {
         NotifyCongestionWindow(connectionId, oldBytes, bytes);
@@ -288,7 +301,8 @@ MrcTransportAdapter::TryTransmit(uint32_t connectionId)
             state.transmitQueue.pop_front();
             continue;
         }
-        if (state.inflightBytes + pending->second.wireBytes > state.congestionWindow)
+        if (state.inflightBytes != 0 &&
+            state.inflightBytes + pending->second.wireBytes > state.congestionWindow)
         {
             break;
         }
@@ -413,6 +427,9 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
     while (Ptr<Packet> packet = socket->RecvFrom(from))
     {
         RoceSimulationTag tag;
+        SocketIpTosTag tos;
+        const bool congestionExperienced =
+            packet->PeekPacketTag(tos) && (tos.GetTos() & 0x03) == 0x03;
         if (!packet->PeekPacketTag(tag) ||
             packet->GetSize() <
                 RoceBthHeader::SERIALIZED_SIZE + RoceInvariantCrcTrailer::SERIALIZED_SIZE)
@@ -451,8 +468,18 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
             const uint64_t key = ReceiverKey(tag.GetSourceEndpointId(), tag.GetConnectionId());
             auto& state = m_receivers[key];
             const uint32_t sequence = bth.GetPacketSequence();
+            if (!m_testDropConsumed && m_testDropDataSequenceOnce != 0 &&
+                sequence == m_testDropDataSequenceOnce)
+            {
+                m_testDropConsumed = true;
+                continue;
+            }
             if (sequence > state.cumulativeAck + m_receiveBitmapLength)
             {
+                SendReliabilityNack(tag,
+                                    sequence,
+                                    tseth.GetTimestamp(),
+                                    MrcNackReason::PSN_OUT_OF_RANGE);
                 continue;
             }
             bool newPacket = false;
@@ -462,6 +489,8 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
             }
             if (newPacket)
             {
+                state.highestPsn = std::max(state.highestPsn, sequence);
+                state.receivedBytes += tag.GetPayloadBytes() + 40;
                 NotifyPayloadRx(tag.GetSourceEndpointId(), tag.GetPayloadBytes());
                 auto& message = state.messages[meth.GetMessageSequence()];
                 if (message.messageId == 0)
@@ -496,6 +525,7 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
             {
                 ++state.cumulativeAck;
             }
+            SendReliabilitySack(tag, state, sequence, tseth.GetTimestamp(), congestionExperienced);
             SendTransportAck(tag, state.cumulativeAck);
         }
         else if (opcode == MrcOpcode::TRANSPORT_ACK)
@@ -507,6 +537,47 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
                 continue;
             }
             ProcessAck(tag.GetConnectionId(), bth.GetPacketSequence());
+        }
+        else if (opcode == MrcOpcode::RELIABILITY_SACK)
+        {
+            MrcSethHeader sack;
+            MrcCcStateHeader ccState;
+            if (packet->RemoveHeader(sack) == 0 || packet->RemoveHeader(ccState) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            ++m_counters.selectiveAcknowledgments;
+            ProcessSack(tag.GetConnectionId(), sack, ccState);
+        }
+        else if (opcode == MrcOpcode::RELIABILITY_NACK)
+        {
+            MrcNethHeader nack;
+            if (packet->RemoveHeader(nack) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            ProcessNack(tag.GetConnectionId(), nack);
+        }
+        else if (opcode == MrcOpcode::RELIABILITY_PROBE)
+        {
+            MrcPethHeader probe;
+            if (packet->RemoveHeader(probe) == 0)
+            {
+                ++m_counters.integrityDrops;
+                continue;
+            }
+            const uint64_t key = ReceiverKey(tag.GetSourceEndpointId(), tag.GetConnectionId());
+            const auto state = m_receivers.find(key);
+            const ReceiverState empty;
+            SendReliabilitySack(tag,
+                                state == m_receivers.end() ? empty : state->second,
+                                0,
+                                probe.GetTimestamp(),
+                                congestionExperienced,
+                                true,
+                                probe.GetProbeId());
         }
     }
 }
@@ -536,6 +607,99 @@ MrcTransportAdapter::SendTransportAck(const RoceSimulationTag& received, uint32_
 }
 
 void
+MrcTransportAdapter::SendReliabilitySack(const RoceSimulationTag& received,
+                                         const ReceiverState& state,
+                                         uint32_t acknowledgedPsn,
+                                         uint16_t timestamp,
+                                         bool congestionExperienced,
+                                         bool probeResponse,
+                                         uint16_t probeId)
+{
+    Ptr<Packet> packet = Create<Packet>();
+    MrcCcStateHeader ccState;
+    ccState.SetTimestamp(timestamp);
+    ccState.SetOutOfOrderCount(
+        static_cast<uint16_t>(std::min<size_t>(state.receivedPsns.size(), 0x7fff)));
+    ccState.SetReceivedBytesUnits(
+        static_cast<uint32_t>(std::min<uint64_t>((state.receivedBytes + 255) / 256, 0xffffff)));
+    packet->AddHeader(ccState);
+
+    MrcSethHeader sack;
+    sack.SetCongestionMark(congestionExperienced ? 1 : 0);
+    sack.SetProbeResponse(probeResponse);
+    const int64_t ackOffset =
+        probeResponse ? probeId : static_cast<int64_t>(acknowledgedPsn) - state.cumulativeAck;
+    sack.SetAcknowledgedPsnOffset(
+        static_cast<int16_t>(std::clamp<int64_t>(ackOffset, INT16_MIN, INT16_MAX)));
+    sack.SetEntropy(received.GetPathId());
+    sack.SetSourcePdcId(static_cast<uint16_t>(received.GetConnectionId()));
+    sack.SetDestinationPdcId(static_cast<uint16_t>(received.GetConnectionId()));
+    sack.SetCumulativeAck(state.cumulativeAck);
+    sack.SetCcType(0);
+    sack.SetMaximumPsnRange(
+        static_cast<uint8_t>(std::min<uint32_t>(m_receiveBitmapLength / 128, 0xff)));
+    sack.SetSackOffset(1);
+    uint64_t bitmap = 0;
+    for (uint32_t offset = 0; offset < MrcSethHeader::BITMAP_BITS; ++offset)
+    {
+        if (state.receivedPsns.contains(state.cumulativeAck + 1 + offset))
+        {
+            bitmap |= 1ULL << offset;
+        }
+    }
+    sack.SetBitmap(bitmap);
+    packet->AddHeader(sack);
+
+    RoceBthHeader bth;
+    bth.SetOpcode(static_cast<RoceOpcode>(MrcOpcode::RELIABILITY_SACK));
+    bth.SetDestinationQp(received.GetConnectionId());
+    bth.SetPacketSequence(state.cumulativeAck);
+    packet->AddHeader(bth);
+    RoceSimulationTag response;
+    response.SetSourceEndpointId(m_config.endpointId);
+    response.SetDestinationEndpointId(received.GetSourceEndpointId());
+    response.SetConnectionId(received.GetConnectionId());
+    response.SetMessageId(received.GetMessageId());
+    SendWirePacket(packet,
+                   response,
+                   received.GetConnectionId(),
+                   state.cumulativeAck,
+                   received.GetPathId());
+}
+
+void
+MrcTransportAdapter::SendReliabilityNack(const RoceSimulationTag& received,
+                                         uint32_t packetSequence,
+                                         uint16_t timestamp,
+                                         MrcNackReason reason)
+{
+    Ptr<Packet> packet = Create<Packet>();
+    MrcNethHeader nack;
+    nack.SetReason(reason);
+    nack.SetEntropy(received.GetPathId());
+    nack.SetSourcePdcId(static_cast<uint16_t>(received.GetConnectionId()));
+    nack.SetDestinationPdcId(static_cast<uint16_t>(received.GetConnectionId()));
+    nack.SetNackPsn(packetSequence);
+    nack.SetTimestamp(timestamp);
+    packet->AddHeader(nack);
+    RoceBthHeader bth;
+    bth.SetOpcode(static_cast<RoceOpcode>(MrcOpcode::RELIABILITY_NACK));
+    bth.SetDestinationQp(received.GetConnectionId());
+    bth.SetPacketSequence(packetSequence);
+    packet->AddHeader(bth);
+    RoceSimulationTag response;
+    response.SetSourceEndpointId(m_config.endpointId);
+    response.SetDestinationEndpointId(received.GetSourceEndpointId());
+    response.SetConnectionId(received.GetConnectionId());
+    response.SetMessageId(received.GetMessageId());
+    SendWirePacket(packet,
+                   response,
+                   received.GetConnectionId(),
+                   packetSequence,
+                   received.GetPathId());
+}
+
+void
 MrcTransportAdapter::ProcessAck(uint32_t connectionId, uint32_t cumulativeAck)
 {
     auto connection = m_connections.find(connectionId);
@@ -552,10 +716,13 @@ MrcTransportAdapter::ProcessAck(uint32_t connectionId, uint32_t cumulativeAck)
             ++pending;
             continue;
         }
-        pending->second.timeout.Cancel();
-        state.inflightBytes = state.inflightBytes > pending->second.wireBytes
-                                  ? state.inflightBytes - pending->second.wireBytes
-                                  : 0;
+        if (!pending->second.reliabilityAcknowledged)
+        {
+            pending->second.timeout.Cancel();
+            state.inflightBytes = state.inflightBytes > pending->second.wireBytes
+                                      ? state.inflightBytes - pending->second.wireBytes
+                                      : 0;
+        }
         const uint64_t messageId = pending->second.tag.GetMessageId();
         auto message = state.messages.find(messageId);
         if (message != state.messages.end() && message->second.remainingPackets > 0 &&
@@ -566,6 +733,183 @@ MrcTransportAdapter::ProcessAck(uint32_t connectionId, uint32_t cumulativeAck)
         pending = state.pending.erase(pending);
     }
     TryTransmit(connectionId);
+}
+
+void
+MrcTransportAdapter::MarkReliabilityAcknowledged(ConnectionState& state, uint32_t sequence)
+{
+    auto pending = state.pending.find(sequence);
+    if (pending == state.pending.end() || !pending->second.sent ||
+        pending->second.reliabilityAcknowledged)
+    {
+        return;
+    }
+    pending->second.reliabilityAcknowledged = true;
+    pending->second.timeout.Cancel();
+    state.inflightBytes = state.inflightBytes > pending->second.wireBytes
+                              ? state.inflightBytes - pending->second.wireBytes
+                              : 0;
+}
+
+void
+MrcTransportAdapter::ProcessSack(uint32_t connectionId,
+                                 const MrcSethHeader& sack,
+                                 const MrcCcStateHeader& ccState)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end())
+    {
+        return;
+    }
+    auto& state = connection->second;
+    const uint32_t receivedUnits = ccState.GetReceivedBytesUnits();
+    const uint32_t deltaUnits = (receivedUnits - state.previousReceivedByteUnits) & 0xffffff;
+    const bool forwardProgress = deltaUnits != 0 && deltaUnits < 0x800000;
+    const uint32_t newlyReceivedBytes = forwardProgress ? deltaUnits << 8 : 0;
+    if (forwardProgress)
+    {
+        state.previousReceivedByteUnits = receivedUnits;
+    }
+    const uint16_t nowTimestamp =
+        static_cast<uint16_t>((Simulator::Now().GetNanoSeconds() / 128) & 0xffff);
+    const uint16_t elapsedTicks = nowTimestamp - ccState.GetTimestamp();
+    const Time measuredRtt = NanoSeconds(std::max<uint64_t>(128, elapsedTicks * 128ULL));
+    const bool ecnMarked = sack.GetCongestionMark() != 0;
+    const uint32_t oldWindow = state.congestionWindow;
+    state.congestionWindow = state.nscc.OnAck(newlyReceivedBytes, ecnMarked, measuredRtt);
+    if (ecnMarked)
+    {
+        NotifyEcnReceived(connectionId, sack.GetEntropy() % state.paths.size());
+    }
+    if (oldWindow != state.congestionWindow)
+    {
+        NotifyCongestionWindow(connectionId, oldWindow, state.congestionWindow);
+    }
+    const uint32_t cumulativeAck = sack.GetCumulativeAck();
+    bool inferredLoss = false;
+    for (auto& [sequence, pending] : state.pending)
+    {
+        if (sequence <= cumulativeAck && pending.sent)
+        {
+            MarkReliabilityAcknowledged(state, sequence);
+        }
+    }
+
+    const int64_t bitmapBaseSigned = static_cast<int64_t>(cumulativeAck) + sack.GetSackOffset();
+    if (bitmapBaseSigned < 0 || bitmapBaseSigned > 0xffffff)
+    {
+        return;
+    }
+    const uint32_t bitmapBase = static_cast<uint32_t>(bitmapBaseSigned);
+    uint32_t highestReceived = cumulativeAck;
+    for (uint32_t offset = 0; offset < MrcSethHeader::BITMAP_BITS; ++offset)
+    {
+        if (!sack.IsReceived(offset))
+        {
+            continue;
+        }
+        const uint32_t sequence = bitmapBase + offset;
+        MarkReliabilityAcknowledged(state, sequence);
+        highestReceived = std::max(highestReceived, sequence);
+    }
+    if (!sack.IsProbeResponse())
+    {
+        const int64_t acknowledged =
+            static_cast<int64_t>(cumulativeAck) + sack.GetAcknowledgedPsnOffset();
+        if (acknowledged >= 0 && acknowledged <= 0xffffff)
+        {
+            MarkReliabilityAcknowledged(state, static_cast<uint32_t>(acknowledged));
+            highestReceived = std::max(highestReceived, static_cast<uint32_t>(acknowledged));
+        }
+    }
+
+    const uint32_t reorderTolerancePackets =
+        std::max<uint32_t>(3, m_config.maximumWindowBytes / m_config.payloadMtuBytes);
+    for (auto& [sequence, pending] : state.pending)
+    {
+        if (sequence <= cumulativeAck || sequence > highestReceived || !pending.sent ||
+            pending.reliabilityAcknowledged || pending.fastRetransmitted ||
+            pending.retransmissions >= m_config.maxRetransmissions ||
+            highestReceived - sequence < reorderTolerancePackets)
+        {
+            continue;
+        }
+        pending.fastRetransmitted = true;
+        ++pending.retransmissions;
+        ++m_counters.fastRetransmissions;
+        inferredLoss = true;
+        TransmitSequence(connectionId, sequence, true);
+    }
+    if (inferredLoss)
+    {
+        const uint32_t beforeLoss = state.congestionWindow;
+        state.congestionWindow = state.nscc.OnLoss();
+        if (beforeLoss != state.congestionWindow)
+        {
+            NotifyCongestionWindow(connectionId, beforeLoss, state.congestionWindow);
+        }
+    }
+    TryTransmit(connectionId);
+}
+
+void
+MrcTransportAdapter::ProcessNack(uint32_t connectionId, const MrcNethHeader& nack)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end())
+    {
+        return;
+    }
+    auto pending = connection->second.pending.find(nack.GetNackPsn());
+    if (pending == connection->second.pending.end() || !pending->second.sent ||
+        pending->second.reliabilityAcknowledged ||
+        pending->second.retransmissions >= m_config.maxRetransmissions)
+    {
+        return;
+    }
+    NotifyNack(connectionId, nack.GetNackPsn());
+    if (nack.GetReason() == MrcNackReason::UNEXPECTED_EVENT)
+    {
+        return;
+    }
+    ++pending->second.retransmissions;
+    ++m_counters.fastRetransmissions;
+    const uint32_t oldWindow = connection->second.congestionWindow;
+    connection->second.congestionWindow = connection->second.nscc.OnLoss();
+    if (oldWindow != connection->second.congestionWindow)
+    {
+        NotifyCongestionWindow(connectionId, oldWindow, connection->second.congestionWindow);
+    }
+    TransmitSequence(connectionId, nack.GetNackPsn(), true);
+}
+
+void
+MrcTransportAdapter::SendReliabilityProbe(uint32_t connectionId, uint32_t pathId)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end())
+    {
+        return;
+    }
+    const uint16_t probeId = static_cast<uint16_t>(connection->second.nextSequence);
+    Ptr<Packet> packet = Create<Packet>();
+    MrcPethHeader probe;
+    probe.SetProbeId(probeId);
+    probe.SetSourcePdcId(static_cast<uint16_t>(connectionId));
+    probe.SetDestinationPdcId(static_cast<uint16_t>(connectionId));
+    probe.SetTimestamp(static_cast<uint16_t>((Simulator::Now().GetNanoSeconds() / 128) & 0xffff));
+    packet->AddHeader(probe);
+    RoceBthHeader bth;
+    bth.SetOpcode(static_cast<RoceOpcode>(MrcOpcode::RELIABILITY_PROBE));
+    bth.SetDestinationQp(connectionId);
+    bth.SetPacketSequence(probeId);
+    packet->AddHeader(bth);
+    RoceSimulationTag tag;
+    tag.SetSourceEndpointId(m_config.endpointId);
+    tag.SetDestinationEndpointId(connection->second.remoteEndpointId);
+    tag.SetConnectionId(connectionId);
+    SendWirePacket(packet, tag, connectionId, probeId, pathId);
+    ++m_counters.rttProbes;
 }
 
 void
@@ -583,7 +927,15 @@ MrcTransportAdapter::HandleTimeout(uint32_t connectionId, uint32_t sequence)
         return;
     }
     NotifyTimeout(connectionId, sequence);
+    SendReliabilityProbe(connectionId, pending->second.pathId);
     ++pending->second.retransmissions;
+    pending->second.fastRetransmitted = false;
+    const uint32_t oldWindow = connection->second.congestionWindow;
+    connection->second.congestionWindow = connection->second.nscc.OnLoss();
+    if (oldWindow != connection->second.congestionWindow)
+    {
+        NotifyCongestionWindow(connectionId, oldWindow, connection->second.congestionWindow);
+    }
     TransmitSequence(connectionId, sequence, true);
 }
 

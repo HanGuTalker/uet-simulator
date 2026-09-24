@@ -7,6 +7,7 @@
 #define MRC_TRANSPORT_ADAPTER_H
 
 #include "mrc-header.h"
+#include "mrc-nscc.h"
 
 #include "ns3/ai-transport-endpoint.h"
 #include "ns3/event-id.h"
@@ -74,6 +75,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
         uint32_t pathId{0};
         uint32_t retransmissions{0};
         bool sent{false};
+        bool reliabilityAcknowledged{false};
+        bool fastRetransmitted{false};
         EventId timeout;
     };
 
@@ -91,6 +94,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
         uint32_t congestionWindow{65536};
         uint32_t inflightBytes{0};
         Time retransmissionTimeout{MicroSeconds(50)};
+        MrcNscc nscc;
+        uint32_t previousReceivedByteUnits{0};
         std::vector<PathState> paths;
         std::deque<uint32_t> transmitQueue;
         std::map<uint32_t, PendingPacket> pending;
@@ -111,6 +116,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
     struct ReceiverState
     {
         uint32_t cumulativeAck{0};
+        uint32_t highestPsn{0};
+        uint64_t receivedBytes{0};
         std::set<uint32_t> receivedPsns;
         std::unordered_map<uint16_t, ReceivedMessage> messages;
     };
@@ -125,7 +132,24 @@ class MrcTransportAdapter : public AiTransportEndpoint
                         uint32_t sequence,
                         uint32_t pathId);
     void SendTransportAck(const RoceSimulationTag& received, uint32_t cumulativeAck);
+    void SendReliabilitySack(const RoceSimulationTag& received,
+                             const ReceiverState& state,
+                             uint32_t acknowledgedPsn,
+                             uint16_t timestamp,
+                             bool congestionExperienced,
+                             bool probeResponse = false,
+                             uint16_t probeId = 0);
+    void SendReliabilityNack(const RoceSimulationTag& received,
+                             uint32_t packetSequence,
+                             uint16_t timestamp,
+                             MrcNackReason reason);
+    void SendReliabilityProbe(uint32_t connectionId, uint32_t pathId);
     void ProcessAck(uint32_t connectionId, uint32_t cumulativeAck);
+    void ProcessSack(uint32_t connectionId,
+                     const MrcSethHeader& sack,
+                     const MrcCcStateHeader& ccState);
+    void ProcessNack(uint32_t connectionId, const MrcNethHeader& nack);
+    void MarkReliabilityAcknowledged(ConnectionState& state, uint32_t sequence);
     void HandleTimeout(uint32_t connectionId, uint32_t sequence);
     uint64_t ReceiverKey(uint32_t sourceEndpointId, uint32_t connectionId) const;
     MrcOpcode SelectOpcode(uint32_t fragment, uint32_t fragments) const;
@@ -138,6 +162,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
     uint32_t m_pathMtu{9000};
     uint32_t m_pathCount{4};
     uint32_t m_receiveBitmapLength{4096};
+    uint32_t m_testDropDataSequenceOnce{0};
+    bool m_testDropConsumed{false};
     std::unordered_map<uint32_t, Peer> m_peers;
     std::unordered_map<uint32_t, ConnectionState> m_connections;
     std::unordered_map<uint64_t, ReceiverState> m_receivers;
