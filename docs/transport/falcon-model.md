@@ -6,7 +6,7 @@ The implementation follows the *OCP Falcon Networking Transport Specification*, 
 dated 22 April 2026. The public Isekai simulator is used as a behavior reference, while the OCP
 document remains the normative source for wire fields and state-machine requirements.
 
-## Phase P0: wire foundation
+## Phases P0-P1: wire foundation
 
 The initial Falcon module provides:
 
@@ -27,3 +27,16 @@ prematurely assigning Swift/RUE/CSIG behavior. Resync, the transaction and packe
 machines, Swift/RUE congestion control, PLB, PSP/ESP overhead modeling and the common transport
 adapter are subsequent phases. Until the adapter is registered, `--transport=falcon` remains
 intentionally unavailable to workload experiments.
+
+## Phase P2: reliability state
+
+`FalconReliabilityManager` implements the protocol's independent data and request PSN spaces. It
+tracks transmitted packets, rejects duplicates and packets beyond the representable ACK window,
+advances cumulative data/request window bases, generates BACK/EACK state and consumes BACK, EACK
+and NACK feedback. Data-received and ULP-acknowledged states remain distinct: an EACK receive bit
+suppresses ambiguity without retiring the sender's packet until the ACK bitmap confirms it.
+
+The current state machine intentionally stops below the socket layer. Timer policy, packet
+scheduling, transaction segmentation and connection lookup will be supplied by the Falcon common
+transport adapter in P3. PSN wraparound is also deferred; the implementation asserts before local
+allocation wraps so experiments cannot silently compare ambiguous sequence numbers.
