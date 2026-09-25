@@ -33,6 +33,24 @@ enum class MrcQpError : uint8_t
     RETRY_COUNTER_EXCEEDED = 1,
     REMOTE_INVALID_REQUEST = 2,
     REMOTE_OPERATION_ERROR = 3,
+    CONNECTION_SETUP_TIMEOUT = 4,
+    INCOMPATIBLE_ATTRIBUTES = 5,
+};
+
+enum class MrcConnectionState : uint8_t
+{
+    NEGOTIATING = 0,
+    READY = 1,
+    ERROR = 2,
+};
+
+struct MrcConnectionAttributes
+{
+    uint16_t maxWriteImmediateDestination{32};
+    uint8_t maxMprDestination{8};
+    bool dynamicMpr{false};
+    bool trimNack{true};
+    bool serviceTime{false};
 };
 
 enum class MrcEvState : uint8_t
@@ -67,6 +85,13 @@ class MrcTransportAdapter : public AiTransportEndpoint
     AiTransportCounters GetCounters() const override;
     bool IsConnectionInError(uint32_t connectionId) const;
     MrcQpError GetConnectionError(uint32_t connectionId) const;
+    MrcConnectionState GetConnectionState(uint32_t connectionId) const;
+    MrcConnectionAttributes GetLocalConnectionAttributes() const;
+    MrcConnectionAttributes GetNegotiatedConnectionAttributes(uint32_t connectionId) const;
+    bool SetPeerConnectionAttributes(uint32_t endpointId,
+                                     const MrcConnectionAttributes& attributes);
+    bool CompleteOutOfBandSetup(uint32_t connectionId,
+                                const MrcConnectionAttributes& peerAttributes);
     uint16_t SendEvProbe(uint32_t endpointId, uint32_t pathId = 0);
     uint16_t SendPortStatusUpdate(uint32_t endpointId,
                                   uint32_t portStatusMask,
@@ -115,6 +140,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
     struct MessageState
     {
         uint32_t remainingPackets{0};
+        bool writeImmediate{false};
     };
 
     struct ConnectionState
@@ -126,7 +152,16 @@ class MrcTransportAdapter : public AiTransportEndpoint
         uint32_t nextPath{0};
         uint32_t congestionWindow{65536};
         uint32_t inflightBytes{0};
+        uint32_t inflightPackets{0};
+        uint32_t writeImmediateInflight{0};
+        uint32_t maxMprPackets{1024};
+        uint16_t maxWriteImmediateDestination{32};
+        bool dynamicMpr{false};
+        bool peerTrimNack{true};
+        bool peerServiceTime{false};
+        MrcConnectionState setupState{MrcConnectionState::NEGOTIATING};
         MrcQpError error{MrcQpError::NONE};
+        EventId setupTimeout;
         Time retransmissionTimeout{MicroSeconds(50)};
         MrcNscc nscc;
         uint32_t previousReceivedByteUnits{0};
@@ -214,6 +249,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
     bool UpdateEvState(uint32_t connectionId, uint32_t pathId, MrcEvState state);
     void RecoverSkippedEv(uint32_t connectionId, uint32_t pathId);
     void ProbeBadEv(uint32_t connectionId, uint32_t pathId);
+    void HandleConnectionSetupTimeout(uint32_t connectionId);
     void ProcessAck(uint32_t connectionId, uint32_t cumulativeAck);
     void ProcessSack(uint32_t connectionId,
                      const MrcSethHeader& sack,
@@ -234,7 +270,12 @@ class MrcTransportAdapter : public AiTransportEndpoint
     uint32_t m_pathMtu{9000};
     uint32_t m_pathCount{4};
     uint32_t m_receiveBitmapLength{4096};
-    uint32_t m_maxWriteImmediateInflight{64};
+    uint32_t m_maxWriteImmediateInflight{32};
+    bool m_requireExplicitConnectionSetup{false};
+    Time m_connectionSetupTimeout{MilliSeconds(1)};
+    bool m_dynamicMprSupported{false};
+    bool m_trimNackSupported{true};
+    bool m_serviceTimeSupported{false};
     Time m_endpointResponseTimeout{MicroSeconds(50)};
     Time m_evSkipDuration{MicroSeconds(5)};
     Time m_evRecoveryProbeInterval{MicroSeconds(50)};
@@ -242,6 +283,7 @@ class MrcTransportAdapter : public AiTransportEndpoint
     bool m_testDropConsumed{false};
     uint16_t m_nextEndpointRequestId{1};
     std::unordered_map<uint32_t, Peer> m_peers;
+    std::unordered_map<uint32_t, MrcConnectionAttributes> m_peerConnectionAttributes;
     std::unordered_map<uint32_t, ConnectionState> m_connections;
     std::unordered_map<uint64_t, ReceiverState> m_receivers;
     std::unordered_map<uint64_t, EndpointRequestState> m_endpointRequests;

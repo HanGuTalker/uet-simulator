@@ -95,5 +95,6 @@ layouts, packet spraying, out-of-order direct placement, ordered completion, ind
 ACK and Reliability SACK/NACK processing, reliability probes, selective recovery, endpoint
 trimming recovery, retry-limit/non-retriable QP error transitions and SACK-clocked NSCC. Its
 connectionless Endpoint Operations provide EV Probe RTT/reachability, Port Status Update state,
-and active-EV selection with `GOOD`, `DENIED`, `SKIP` and `ASSUMED_BAD` recovery states.
+active-EV selection with `GOOD`, `DENIED`, `SKIP` and `ASSUMED_BAD` recovery states, and the
+specification-required out-of-band QP attribute setup.
 Its implemented and deferred functions are documented in `docs/transport/mrc-model.md`.

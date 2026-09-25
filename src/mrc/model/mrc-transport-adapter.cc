@@ -5,6 +5,7 @@
 
 #include "mrc-transport-adapter.h"
 
+#include "ns3/boolean.h"
 #include "ns3/inet-socket-address.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/node.h"
@@ -47,9 +48,34 @@ MrcTransportAdapter::GetTypeId()
                           MakeUintegerChecker<uint32_t>(128, 32640))
             .AddAttribute("MaxWriteImmediateInflight",
                           "Maximum incomplete WriteIMM immediate values stashed per responder QP.",
-                          UintegerValue(64),
+                          UintegerValue(32),
                           MakeUintegerAccessor(&MrcTransportAdapter::m_maxWriteImmediateInflight),
-                          MakeUintegerChecker<uint32_t>(1, 65535))
+                          MakeUintegerChecker<uint32_t>(0, 32))
+            .AddAttribute("RequireExplicitConnectionSetup",
+                          "Require explicit out-of-band peer attributes before a QP is READY.",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&MrcTransportAdapter::m_requireExplicitConnectionSetup),
+                          MakeBooleanChecker())
+            .AddAttribute("ConnectionSetupTimeout",
+                          "Maximum time to wait for explicit out-of-band QP attributes.",
+                          TimeValue(MilliSeconds(1)),
+                          MakeTimeAccessor(&MrcTransportAdapter::m_connectionSetupTimeout),
+                          MakeTimeChecker(MicroSeconds(1)))
+            .AddAttribute("DynamicMprSupported",
+                          "Whether this endpoint supports negotiated Dynamic MPR.",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&MrcTransportAdapter::m_dynamicMprSupported),
+                          MakeBooleanChecker())
+            .AddAttribute("TrimNackSupported",
+                          "Whether this endpoint generates TRIM reliability NACKs.",
+                          BooleanValue(true),
+                          MakeBooleanAccessor(&MrcTransportAdapter::m_trimNackSupported),
+                          MakeBooleanChecker())
+            .AddAttribute("ServiceTimeSupported",
+                          "Whether this endpoint supports responder service-time reporting.",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&MrcTransportAdapter::m_serviceTimeSupported),
+                          MakeBooleanChecker())
             .AddAttribute("EndpointResponseTimeout",
                           "Time to wait for a best-effort Endpoint Operation response.",
                           TimeValue(MicroSeconds(50)),
@@ -170,6 +196,23 @@ MrcTransportAdapter::OpenConnection(const AiTransportConnectionConfig& config)
                           m_config.baseRtt,
                           m_config.targetQueueDelay);
     m_connections.emplace(connectionId, std::move(state));
+    const auto peerAttributes = m_peerConnectionAttributes.find(config.remoteEndpointId);
+    if (peerAttributes != m_peerConnectionAttributes.end())
+    {
+        CompleteOutOfBandSetup(connectionId, peerAttributes->second);
+    }
+    else if (m_requireExplicitConnectionSetup)
+    {
+        m_connections.at(connectionId).setupTimeout =
+            Simulator::Schedule(m_connectionSetupTimeout,
+                                &MrcTransportAdapter::HandleConnectionSetupTimeout,
+                                this,
+                                connectionId);
+    }
+    else
+    {
+        CompleteOutOfBandSetup(connectionId, GetLocalConnectionAttributes());
+    }
     return connectionId;
 }
 
@@ -205,7 +248,8 @@ MrcTransportAdapter::Submit(const AiTransportRequest& request)
         return false;
     }
     auto& state = connection->second;
-    if (state.error != MrcQpError::NONE || state.messages.contains(request.messageId))
+    if (state.setupState != MrcConnectionState::READY || state.error != MrcQpError::NONE ||
+        state.messages.contains(request.messageId))
     {
         return false;
     }
@@ -213,6 +257,11 @@ MrcTransportAdapter::Submit(const AiTransportRequest& request)
     const uint32_t fragments =
         (totalBytes + m_config.payloadMtuBytes - 1) / m_config.payloadMtuBytes;
     const bool writeImmediate = request.operation == AiTransportOperation::WRITE_IMMEDIATE;
+    if (writeImmediate &&
+        state.writeImmediateInflight >= state.maxWriteImmediateDestination)
+    {
+        return false;
+    }
     if (state.nextSequence + fragments > 0xffffff || state.nextMessageSequence > 0xffff ||
         (writeImmediate && state.nextReceiveQueueMessageSequence > 0xffff))
     {
@@ -221,7 +270,11 @@ MrcTransportAdapter::Submit(const AiTransportRequest& request)
     const uint16_t msn = static_cast<uint16_t>(state.nextMessageSequence++);
     const uint16_t rqmsn =
         writeImmediate ? static_cast<uint16_t>(state.nextReceiveQueueMessageSequence++) : 0;
-    state.messages.emplace(request.messageId, MessageState{fragments});
+    state.messages.emplace(request.messageId, MessageState{fragments, writeImmediate});
+    if (writeImmediate)
+    {
+        ++state.writeImmediateInflight;
+    }
     uint32_t offset = 0;
     for (uint32_t fragment = 0; fragment < fragments; ++fragment)
     {
@@ -330,6 +383,90 @@ MrcTransportAdapter::GetConnectionError(uint32_t connectionId) const
     return connection == m_connections.end() ? MrcQpError::NONE : connection->second.error;
 }
 
+MrcConnectionState
+MrcTransportAdapter::GetConnectionState(uint32_t connectionId) const
+{
+    const auto connection = m_connections.find(connectionId);
+    return connection == m_connections.end() ? MrcConnectionState::ERROR
+                                             : connection->second.setupState;
+}
+
+MrcConnectionAttributes
+MrcTransportAdapter::GetLocalConnectionAttributes() const
+{
+    MrcConnectionAttributes attributes;
+    attributes.maxWriteImmediateDestination =
+        static_cast<uint16_t>(std::min<uint32_t>(m_maxWriteImmediateInflight, 0xffff));
+    attributes.maxMprDestination = static_cast<uint8_t>(
+        std::clamp<uint32_t>(m_receiveBitmapLength / 128, 1, 32));
+    attributes.dynamicMpr = m_dynamicMprSupported;
+    attributes.trimNack = m_trimNackSupported;
+    attributes.serviceTime = m_serviceTimeSupported;
+    return attributes;
+}
+
+MrcConnectionAttributes
+MrcTransportAdapter::GetNegotiatedConnectionAttributes(uint32_t connectionId) const
+{
+    MrcConnectionAttributes attributes;
+    const auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end())
+    {
+        attributes.maxWriteImmediateDestination = 0;
+        attributes.maxMprDestination = 0;
+        attributes.trimNack = false;
+        return attributes;
+    }
+    const auto& state = connection->second;
+    attributes.maxWriteImmediateDestination = state.maxWriteImmediateDestination;
+    attributes.maxMprDestination = static_cast<uint8_t>(state.maxMprPackets / 128);
+    attributes.dynamicMpr = state.dynamicMpr;
+    attributes.trimNack = state.peerTrimNack;
+    attributes.serviceTime = state.peerServiceTime;
+    return attributes;
+}
+
+bool
+MrcTransportAdapter::SetPeerConnectionAttributes(
+    uint32_t endpointId,
+    const MrcConnectionAttributes& attributes)
+{
+    if (!m_peers.contains(endpointId) || attributes.maxMprDestination == 0 ||
+        attributes.maxMprDestination > 32)
+    {
+        return false;
+    }
+    m_peerConnectionAttributes[endpointId] = attributes;
+    return true;
+}
+
+bool
+MrcTransportAdapter::CompleteOutOfBandSetup(
+    uint32_t connectionId,
+    const MrcConnectionAttributes& peerAttributes)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() ||
+        connection->second.setupState != MrcConnectionState::NEGOTIATING)
+    {
+        return false;
+    }
+    auto& state = connection->second;
+    if (peerAttributes.maxMprDestination == 0 || peerAttributes.maxMprDestination > 32)
+    {
+        TransitionConnectionToError(connectionId, MrcQpError::INCOMPATIBLE_ATTRIBUTES);
+        return false;
+    }
+    state.setupTimeout.Cancel();
+    state.maxWriteImmediateDestination = peerAttributes.maxWriteImmediateDestination;
+    state.maxMprPackets = static_cast<uint32_t>(peerAttributes.maxMprDestination) * 128;
+    state.dynamicMpr = m_dynamicMprSupported && peerAttributes.dynamicMpr;
+    state.peerTrimNack = peerAttributes.trimNack;
+    state.peerServiceTime = peerAttributes.serviceTime;
+    state.setupState = MrcConnectionState::READY;
+    return true;
+}
+
 uint16_t
 MrcTransportAdapter::SendEvProbe(uint32_t endpointId, uint32_t pathId)
 {
@@ -417,8 +554,9 @@ MrcTransportAdapter::TryTransmit(uint32_t connectionId)
             state.transmitQueue.pop_front();
             continue;
         }
-        if (state.inflightBytes != 0 &&
-            state.inflightBytes + pending->second.wireBytes > state.congestionWindow)
+        if (state.inflightPackets >= state.maxMprPackets ||
+            (state.inflightBytes != 0 &&
+             state.inflightBytes + pending->second.wireBytes > state.congestionWindow))
         {
             break;
         }
@@ -429,6 +567,7 @@ MrcTransportAdapter::TryTransmit(uint32_t connectionId)
         }
         state.transmitQueue.pop_front();
         state.inflightBytes += pending->second.wireBytes;
+        ++state.inflightPackets;
         pending->second.sent = true;
         pending->second.pathId = *selectedPath;
         auto& path = state.paths[pending->second.pathId];
@@ -610,10 +749,13 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
             if (trimmed)
             {
                 NotifyPacketTrimmed(wireImage, tag.GetConnectionId(), tag.GetPathId());
-                SendReliabilityNack(tag,
-                                    bth.GetPacketSequence(),
-                                    tseth.GetTimestamp(),
-                                    MrcNackReason::TRIMMED);
+                if (m_trimNackSupported)
+                {
+                    SendReliabilityNack(tag,
+                                        bth.GetPacketSequence(),
+                                        tseth.GetTimestamp(),
+                                        MrcNackReason::TRIMMED);
+                }
                 continue;
             }
             if (packet->RemoveHeader(reth) == 0)
@@ -922,8 +1064,13 @@ MrcTransportAdapter::SendReliabilitySack(const RoceSimulationTag& received,
     sack.SetDestinationPdcId(static_cast<uint16_t>(received.GetConnectionId()));
     sack.SetCumulativeAck(state.cumulativeAck);
     sack.SetCcType(0);
+    const auto peerAttributes = m_peerConnectionAttributes.find(received.GetSourceEndpointId());
+    const bool dynamicMpr = m_dynamicMprSupported &&
+                            peerAttributes != m_peerConnectionAttributes.end() &&
+                            peerAttributes->second.dynamicMpr;
     sack.SetMaximumPsnRange(
-        static_cast<uint8_t>(std::min<uint32_t>(m_receiveBitmapLength / 128, 0xff)));
+        dynamicMpr ? static_cast<uint8_t>(std::min<uint32_t>(m_receiveBitmapLength / 128, 32))
+                   : 0);
     sack.SetSackOffset(1);
     uint64_t bitmap = 0;
     for (uint32_t offset = 0; offset < MrcSethHeader::BITMAP_BITS; ++offset)
@@ -1008,12 +1155,17 @@ MrcTransportAdapter::ProcessAck(uint32_t connectionId, uint32_t cumulativeAck)
             state.inflightBytes = state.inflightBytes > pending->second.wireBytes
                                       ? state.inflightBytes - pending->second.wireBytes
                                       : 0;
+            state.inflightPackets = state.inflightPackets > 0 ? state.inflightPackets - 1 : 0;
         }
         const uint64_t messageId = pending->second.tag.GetMessageId();
         auto message = state.messages.find(messageId);
         if (message != state.messages.end() && message->second.remainingPackets > 0 &&
             --message->second.remainingPackets == 0)
         {
+            if (message->second.writeImmediate && state.writeImmediateInflight > 0)
+            {
+                --state.writeImmediateInflight;
+            }
             state.messages.erase(message);
         }
         pending = state.pending.erase(pending);
@@ -1035,6 +1187,7 @@ MrcTransportAdapter::MarkReliabilityAcknowledged(ConnectionState& state, uint32_
     state.inflightBytes = state.inflightBytes > pending->second.wireBytes
                               ? state.inflightBytes - pending->second.wireBytes
                               : 0;
+    state.inflightPackets = state.inflightPackets > 0 ? state.inflightPackets - 1 : 0;
 }
 
 void
@@ -1048,6 +1201,11 @@ MrcTransportAdapter::ProcessSack(uint32_t connectionId,
         return;
     }
     auto& state = connection->second;
+    if (state.dynamicMpr && sack.GetMaximumPsnRange() != 0)
+    {
+        state.maxMprPackets =
+            static_cast<uint32_t>(std::min<uint8_t>(sack.GetMaximumPsnRange(), 32)) * 128;
+    }
     const uint32_t receivedUnits = ccState.GetReceivedBytesUnits();
     const uint32_t deltaUnits = (receivedUnits - state.previousReceivedByteUnits) & 0xffffff;
     const bool forwardProgress = deltaUnits != 0 && deltaUnits < 0x800000;
@@ -1218,13 +1376,28 @@ MrcTransportAdapter::TransitionConnectionToError(uint32_t connectionId, MrcQpErr
     }
     auto& state = connection->second;
     state.error = error;
+    state.setupState = MrcConnectionState::ERROR;
+    state.setupTimeout.Cancel();
     state.transmitQueue.clear();
     state.inflightBytes = 0;
+    state.inflightPackets = 0;
     for (auto& [sequence, pending] : state.pending)
     {
         (void)sequence;
         pending.timeout.Cancel();
     }
+}
+
+void
+MrcTransportAdapter::HandleConnectionSetupTimeout(uint32_t connectionId)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() ||
+        connection->second.setupState != MrcConnectionState::NEGOTIATING)
+    {
+        return;
+    }
+    TransitionConnectionToError(connectionId, MrcQpError::CONNECTION_SETUP_TIMEOUT);
 }
 
 uint16_t
@@ -1477,6 +1650,7 @@ MrcTransportAdapter::DoDispose()
     for (auto& [connectionId, state] : m_connections)
     {
         (void)connectionId;
+        state.setupTimeout.Cancel();
         for (auto& [sequence, pending] : state.pending)
         {
             (void)sequence;
@@ -1496,6 +1670,7 @@ MrcTransportAdapter::DoDispose()
     m_endpointRequests.clear();
     m_endpointPaths.clear();
     m_peerPortStatusMasks.clear();
+    m_peerConnectionAttributes.clear();
     m_peers.clear();
     for (auto& socket : m_pathSockets)
     {

@@ -61,6 +61,14 @@ MRC-specific headers and state remain in the `mrc` module.
   only `GOOD` EVs; ECN or trim feedback temporarily skips an EV, timeouts quarantine it, and
   periodic EV Probes restore a recovered path to `GOOD`. Operator-denied EVs remain inactive until
   explicitly re-enabled.
+- Out-of-band QP attribute provisioning, as required by MRC instead of RDMA-CM. Explicit setup
+  gates data submission on `NEGOTIATING`, `READY` and `ERROR` states and exchanges the responder
+  WriteIMM limit, maximum PSN range, bidirectional Dynamic MPR support, directional Trim NACK
+  support and directional service-time support. Invalid attributes and setup timeout transition the
+  QP to `ERROR`; the common comparison API retains an implicit symmetric provisioning mode.
+- Enforcement of the negotiated responder WriteIMM limit and maximum number of in-flight packets.
+  Dynamic MPR is enabled only when both peers advertise support and then follows non-zero MPR
+  updates in SACKs.
 - Per-QP, sender-side, SACK-clocked NSCC. Reflected 128 ns timestamps provide RTT samples, SETH `m`
   carries ECN feedback, and the controller applies fair additive increase, bounded multiplicative
   decrease and a one-nominal-packet minimum window.
@@ -72,7 +80,7 @@ a simulation mapping and is not presented as a verbs API.
 
 ## Deferred MRC functions
 
-- Negotiated connection parameters and controller-driven endpoint discovery.
+- Controller-driven endpoint discovery and the complete `libmrc`/`mrc_ctl` programming API.
 - Structured EV and SRv6 entropy formats. The current endpoint response reflects timestamps
   without service-time compensation. Path-health state is shared only through the simulator API,
   not the complete MRC Controller API.
@@ -109,5 +117,8 @@ regression suite:
   unanswered EV Probe moved the EV to `ASSUMED_BAD`. After the responder returned, the periodic
   recovery probe restored reachability and the EV's `GOOD` state without consuming connection
   PSNs.
+- explicit out-of-band setup rejected pre-`READY` data, accepted and retained valid directional
+  attributes, rejected an invalid zero MPR, and transitioned an unconfigured QP to `ERROR` on its
+  setup timeout.
 
 These runs are functional smoke checks. They are not tuned performance comparisons.

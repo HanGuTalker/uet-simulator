@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only
  */
 
+#include "ns3/boolean.h"
 #include "ns3/internet-stack-helper.h"
 #include "ns3/ipv4-address-helper.h"
 #include "ns3/mrc-header.h"
@@ -249,6 +250,89 @@ class MrcEndpointOperationsTestCase : public TestCase
     }
 };
 
+class MrcOutOfBandSetupTestCase : public TestCase
+{
+  public:
+    MrcOutOfBandSetupTestCase()
+        : TestCase("MRC out-of-band QP attributes gate connection readiness")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        NodeContainer nodes;
+        nodes.Create(2);
+        PointToPointHelper links;
+        const NetDeviceContainer devices = links.Install(nodes);
+        InternetStackHelper internet;
+        internet.Install(nodes);
+        Ipv4AddressHelper addresses;
+        addresses.SetBase("10.100.0.0", "255.255.255.0");
+        const Ipv4InterfaceContainer interfaces = addresses.Assign(devices);
+
+        Ptr<MrcTransportAdapter> endpoint = CreateObject<MrcTransportAdapter>();
+        endpoint->SetAttribute("RequireExplicitConnectionSetup", BooleanValue(true));
+        endpoint->SetAttribute("ConnectionSetupTimeout", TimeValue(MicroSeconds(10)));
+        endpoint->SetAttribute("DynamicMprSupported", BooleanValue(true));
+        AiTransportEndpointConfig endpointConfig;
+        endpointConfig.endpointId = 1;
+        NS_TEST_ASSERT_MSG_EQ(endpoint->Initialize(nodes.Get(0), endpointConfig), true, "init");
+        NS_TEST_ASSERT_MSG_EQ(endpoint->AddPeer(2, interfaces.GetAddress(1)), true, "peer");
+
+        AiTransportConnectionConfig config;
+        config.remoteEndpointId = 2;
+        const uint32_t readyConnection = endpoint->OpenConnection(config);
+        NS_TEST_EXPECT_MSG_EQ(static_cast<uint8_t>(endpoint->GetConnectionState(readyConnection)),
+                              static_cast<uint8_t>(MrcConnectionState::NEGOTIATING),
+                              "QP bypassed negotiation");
+        AiTransportRequest request;
+        request.remoteEndpointId = 2;
+        request.connectionId = readyConnection;
+        request.messageId = 1;
+        request.payload = Create<Packet>(64);
+        NS_TEST_EXPECT_MSG_EQ(endpoint->Submit(request), false, "pre-READY request accepted");
+
+        MrcConnectionAttributes attributes;
+        attributes.maxWriteImmediateDestination = 4;
+        attributes.maxMprDestination = 2;
+        attributes.dynamicMpr = true;
+        attributes.trimNack = false;
+        attributes.serviceTime = true;
+        NS_TEST_EXPECT_MSG_EQ(endpoint->CompleteOutOfBandSetup(readyConnection, attributes),
+                              true,
+                              "valid attributes rejected");
+        NS_TEST_EXPECT_MSG_EQ(static_cast<uint8_t>(endpoint->GetConnectionState(readyConnection)),
+                              static_cast<uint8_t>(MrcConnectionState::READY),
+                              "QP did not enter READY");
+        const auto negotiated = endpoint->GetNegotiatedConnectionAttributes(readyConnection);
+        NS_TEST_EXPECT_MSG_EQ(negotiated.maxWriteImmediateDestination, 4, "WriteIMM limit changed");
+        NS_TEST_EXPECT_MSG_EQ(negotiated.maxMprDestination, 2, "MPR changed");
+        NS_TEST_EXPECT_MSG_EQ(negotiated.dynamicMpr, true, "Dynamic MPR not negotiated");
+        NS_TEST_EXPECT_MSG_EQ(negotiated.trimNack, false, "Trim NACK direction changed");
+        NS_TEST_EXPECT_MSG_EQ(negotiated.serviceTime, true, "Service time direction changed");
+
+        const uint32_t invalidConnection = endpoint->OpenConnection(config);
+        MrcConnectionAttributes invalid = attributes;
+        invalid.maxMprDestination = 0;
+        NS_TEST_EXPECT_MSG_EQ(endpoint->CompleteOutOfBandSetup(invalidConnection, invalid),
+                              false,
+                              "invalid MPR accepted");
+        NS_TEST_EXPECT_MSG_EQ(static_cast<uint8_t>(endpoint->GetConnectionError(invalidConnection)),
+                              static_cast<uint8_t>(MrcQpError::INCOMPATIBLE_ATTRIBUTES),
+                              "invalid attributes did not fail QP");
+
+        const uint32_t timeoutConnection = endpoint->OpenConnection(config);
+        Simulator::Stop(MicroSeconds(11));
+        Simulator::Run();
+        NS_TEST_EXPECT_MSG_EQ(static_cast<uint8_t>(endpoint->GetConnectionError(timeoutConnection)),
+                              static_cast<uint8_t>(MrcQpError::CONNECTION_SETUP_TIMEOUT),
+                              "setup timeout did not fail QP");
+        endpoint->Dispose();
+        Simulator::Destroy();
+    }
+};
+
 class MrcHeaderTestSuite : public TestSuite
 {
   public:
@@ -257,6 +341,7 @@ class MrcHeaderTestSuite : public TestSuite
     {
         AddTestCase(new MrcReliabilityHeaderTestCase, Duration::QUICK);
         AddTestCase(new MrcEndpointOperationsTestCase, Duration::QUICK);
+        AddTestCase(new MrcOutOfBandSetupTestCase, Duration::QUICK);
     }
 };
 
