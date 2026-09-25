@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <optional>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -32,6 +33,14 @@ enum class MrcQpError : uint8_t
     RETRY_COUNTER_EXCEEDED = 1,
     REMOTE_INVALID_REQUEST = 2,
     REMOTE_OPERATION_ERROR = 3,
+};
+
+enum class MrcEvState : uint8_t
+{
+    GOOD = 0,
+    DENIED = 1,
+    SKIP = 2,
+    ASSUMED_BAD = 3,
 };
 
 /** MRC 1.0 comparison data path with multipath OOO placement and reliable recovery. */
@@ -65,6 +74,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
     bool IsPathReachable(uint32_t endpointId, uint32_t pathId) const;
     Time GetPathRtt(uint32_t endpointId, uint32_t pathId) const;
     uint32_t GetPeerPortStatusMask(uint32_t endpointId) const;
+    MrcEvState GetEvState(uint32_t connectionId, uint32_t pathId) const;
+    bool SetEvDenied(uint32_t connectionId, uint32_t pathId, bool denied);
 
   private:
     struct Peer
@@ -77,6 +88,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
     {
         uint64_t rateBps{0};
         Time nextSend{Seconds(0)};
+        MrcEvState evState{MrcEvState::GOOD};
+        EventId evTimer;
     };
 
     struct PendingPacket
@@ -197,6 +210,10 @@ class MrcTransportAdapter : public AiTransportEndpoint
                               MrcEndpointOperation operation,
                               uint16_t timestamp);
     void HandleEndpointTimeout(uint64_t requestKey);
+    std::optional<uint32_t> SelectActivePath(ConnectionState& state);
+    bool UpdateEvState(uint32_t connectionId, uint32_t pathId, MrcEvState state);
+    void RecoverSkippedEv(uint32_t connectionId, uint32_t pathId);
+    void ProbeBadEv(uint32_t connectionId, uint32_t pathId);
     void ProcessAck(uint32_t connectionId, uint32_t cumulativeAck);
     void ProcessSack(uint32_t connectionId,
                      const MrcSethHeader& sack,
@@ -219,6 +236,8 @@ class MrcTransportAdapter : public AiTransportEndpoint
     uint32_t m_receiveBitmapLength{4096};
     uint32_t m_maxWriteImmediateInflight{64};
     Time m_endpointResponseTimeout{MicroSeconds(50)};
+    Time m_evSkipDuration{MicroSeconds(5)};
+    Time m_evRecoveryProbeInterval{MicroSeconds(50)};
     uint32_t m_testDropDataSequenceOnce{0};
     bool m_testDropConsumed{false};
     uint16_t m_nextEndpointRequestId{1};

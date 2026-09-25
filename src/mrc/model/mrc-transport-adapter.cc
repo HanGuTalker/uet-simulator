@@ -55,6 +55,16 @@ MrcTransportAdapter::GetTypeId()
                           TimeValue(MicroSeconds(50)),
                           MakeTimeAccessor(&MrcTransportAdapter::m_endpointResponseTimeout),
                           MakeTimeChecker(MicroSeconds(1)))
+            .AddAttribute("EvSkipDuration",
+                          "Time an EV remains inactive after transient congestion feedback.",
+                          TimeValue(MicroSeconds(5)),
+                          MakeTimeAccessor(&MrcTransportAdapter::m_evSkipDuration),
+                          MakeTimeChecker(NanoSeconds(1)))
+            .AddAttribute("EvRecoveryProbeInterval",
+                          "Interval between EV probes for an ASSUMED_BAD path.",
+                          TimeValue(MicroSeconds(50)),
+                          MakeTimeAccessor(&MrcTransportAdapter::m_evRecoveryProbeInterval),
+                          MakeTimeChecker(MicroSeconds(1)))
             .AddAttribute("TestDropDataSequenceOnce",
                           "Fault-injection PSN dropped once at each responder; zero disables it.",
                           UintegerValue(0),
@@ -360,6 +370,35 @@ MrcTransportAdapter::GetPeerPortStatusMask(uint32_t endpointId) const
     return status == m_peerPortStatusMasks.end() ? 0 : status->second;
 }
 
+MrcEvState
+MrcTransportAdapter::GetEvState(uint32_t connectionId, uint32_t pathId) const
+{
+    const auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() || pathId >= connection->second.paths.size())
+    {
+        return MrcEvState::DENIED;
+    }
+    return connection->second.paths[pathId].evState;
+}
+
+bool
+MrcTransportAdapter::SetEvDenied(uint32_t connectionId, uint32_t pathId, bool denied)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() || pathId >= connection->second.paths.size())
+    {
+        return false;
+    }
+    auto& path = connection->second.paths[pathId];
+    path.evTimer.Cancel();
+    path.evState = denied ? MrcEvState::DENIED : MrcEvState::GOOD;
+    if (!denied)
+    {
+        TryTransmit(connectionId);
+    }
+    return true;
+}
+
 void
 MrcTransportAdapter::TryTransmit(uint32_t connectionId)
 {
@@ -383,10 +422,15 @@ MrcTransportAdapter::TryTransmit(uint32_t connectionId)
         {
             break;
         }
+        const auto selectedPath = SelectActivePath(state);
+        if (!selectedPath)
+        {
+            break;
+        }
         state.transmitQueue.pop_front();
         state.inflightBytes += pending->second.wireBytes;
         pending->second.sent = true;
-        pending->second.pathId = state.nextPath++ % state.paths.size();
+        pending->second.pathId = *selectedPath;
         auto& path = state.paths[pending->second.pathId];
         const Time sendAt = std::max(Simulator::Now(), path.nextSend);
         Simulator::Schedule(sendAt - Simulator::Now(),
@@ -419,7 +463,19 @@ MrcTransportAdapter::TransmitSequence(uint32_t connectionId, uint32_t sequence, 
     }
     if (retransmission)
     {
-        pending->second.pathId = connection->second.nextPath++ % connection->second.paths.size();
+        const auto selectedPath = SelectActivePath(connection->second);
+        if (!selectedPath)
+        {
+            pending->second.timeout.Cancel();
+            pending->second.timeout = Simulator::Schedule(m_evRecoveryProbeInterval,
+                                                          &MrcTransportAdapter::TransmitSequence,
+                                                          this,
+                                                          connectionId,
+                                                          sequence,
+                                                          true);
+            return;
+        }
+        pending->second.pathId = *selectedPath;
     }
     Ptr<Packet> packet = pending->second.payload->Copy();
     if (pending->second.opcode == MrcOpcode::WRITE_LAST_IMMEDIATE ||
@@ -771,6 +827,13 @@ MrcTransportAdapter::Receive(Ptr<Socket> socket)
                 auto& path = m_endpointPaths[pathKey];
                 path.reachable = true;
                 path.rtt = Simulator::Now() - request->second.sent;
+                for (auto& [connectionId, connection] : m_connections)
+                {
+                    if (connection.remoteEndpointId == request->second.endpointId)
+                    {
+                        UpdateEvState(connectionId, request->second.pathId, MrcEvState::GOOD);
+                    }
+                }
             }
             request->second.timeout.Cancel();
             m_endpointRequests.erase(request);
@@ -997,12 +1060,26 @@ MrcTransportAdapter::ProcessSack(uint32_t connectionId,
         static_cast<uint16_t>((Simulator::Now().GetNanoSeconds() / 128) & 0xffff);
     const uint16_t elapsedTicks = nowTimestamp - ccState.GetTimestamp();
     const Time measuredRtt = NanoSeconds(std::max<uint64_t>(128, elapsedTicks * 128ULL));
-    const bool ecnMarked = sack.GetCongestionMark() != 0;
+    const uint8_t congestionMark = sack.GetCongestionMark();
+    const uint32_t feedbackPath = sack.GetEntropy() % state.paths.size();
+    if (congestionMark == 1)
+    {
+        UpdateEvState(connectionId, feedbackPath, MrcEvState::SKIP);
+    }
+    else if (congestionMark == 2)
+    {
+        UpdateEvState(connectionId, feedbackPath, MrcEvState::ASSUMED_BAD);
+    }
+    else if (sack.IsProbeResponse())
+    {
+        UpdateEvState(connectionId, feedbackPath, MrcEvState::GOOD);
+    }
+    const bool ecnMarked = congestionMark == 1;
     const uint32_t oldWindow = state.congestionWindow;
     state.congestionWindow = state.nscc.OnAck(newlyReceivedBytes, ecnMarked, measuredRtt);
     if (ecnMarked)
     {
-        NotifyEcnReceived(connectionId, sack.GetEntropy() % state.paths.size());
+        NotifyEcnReceived(connectionId, feedbackPath);
     }
     if (oldWindow != state.congestionWindow)
     {
@@ -1090,6 +1167,12 @@ MrcTransportAdapter::ProcessNack(uint32_t connectionId, const MrcNethHeader& nac
         return;
     }
     NotifyNack(connectionId, nack.GetNackPsn());
+    if (nack.GetReason() == MrcNackReason::TRIMMED)
+    {
+        UpdateEvState(connectionId,
+                      nack.GetEntropy() % connection->second.paths.size(),
+                      MrcEvState::SKIP);
+    }
     if (nack.GetReason() == MrcNackReason::UNEXPECTED_EVENT)
     {
         TransitionConnectionToError(connectionId, MrcQpError::REMOTE_OPERATION_ERROR);
@@ -1223,8 +1306,102 @@ MrcTransportAdapter::HandleEndpointTimeout(uint64_t requestKey)
         const uint64_t pathKey = (static_cast<uint64_t>(request->second.endpointId) << 32) |
                                  request->second.pathId;
         m_endpointPaths[pathKey].reachable = false;
+        for (auto& [connectionId, connection] : m_connections)
+        {
+            if (connection.remoteEndpointId == request->second.endpointId)
+            {
+                UpdateEvState(connectionId,
+                              request->second.pathId,
+                              MrcEvState::ASSUMED_BAD);
+            }
+        }
     }
     m_endpointRequests.erase(request);
+}
+
+std::optional<uint32_t>
+MrcTransportAdapter::SelectActivePath(ConnectionState& state)
+{
+    for (uint32_t candidate = 0; candidate < state.paths.size(); ++candidate)
+    {
+        const uint32_t pathId = state.nextPath++ % state.paths.size();
+        if (state.paths[pathId].evState == MrcEvState::GOOD)
+        {
+            return pathId;
+        }
+    }
+    return std::nullopt;
+}
+
+bool
+MrcTransportAdapter::UpdateEvState(uint32_t connectionId,
+                                   uint32_t pathId,
+                                   MrcEvState newState)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() || pathId >= connection->second.paths.size())
+    {
+        return false;
+    }
+    auto& path = connection->second.paths[pathId];
+    if (path.evState == MrcEvState::DENIED && newState != MrcEvState::DENIED)
+    {
+        return false;
+    }
+    path.evTimer.Cancel();
+    path.evState = newState;
+    if (newState == MrcEvState::SKIP)
+    {
+        path.evTimer = Simulator::Schedule(m_evSkipDuration,
+                                           &MrcTransportAdapter::RecoverSkippedEv,
+                                           this,
+                                           connectionId,
+                                           pathId);
+    }
+    else if (newState == MrcEvState::ASSUMED_BAD)
+    {
+        path.evTimer = Simulator::Schedule(m_evRecoveryProbeInterval,
+                                           &MrcTransportAdapter::ProbeBadEv,
+                                           this,
+                                           connectionId,
+                                           pathId);
+    }
+    else if (newState == MrcEvState::GOOD)
+    {
+        TryTransmit(connectionId);
+    }
+    return true;
+}
+
+void
+MrcTransportAdapter::RecoverSkippedEv(uint32_t connectionId, uint32_t pathId)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() || pathId >= connection->second.paths.size() ||
+        connection->second.paths[pathId].evState != MrcEvState::SKIP)
+    {
+        return;
+    }
+    connection->second.paths[pathId].evState = MrcEvState::GOOD;
+    TryTransmit(connectionId);
+}
+
+void
+MrcTransportAdapter::ProbeBadEv(uint32_t connectionId, uint32_t pathId)
+{
+    auto connection = m_connections.find(connectionId);
+    if (connection == m_connections.end() || pathId >= connection->second.paths.size() ||
+        connection->second.paths[pathId].evState != MrcEvState::ASSUMED_BAD)
+    {
+        return;
+    }
+    SendEvProbe(connection->second.remoteEndpointId, pathId);
+    connection->second.paths[pathId].evTimer =
+        Simulator::Schedule(m_evRecoveryProbeInterval,
+                            &MrcTransportAdapter::ProbeBadEv,
+                            this,
+                            connectionId,
+                            pathId);
 }
 
 void
@@ -1275,6 +1452,7 @@ MrcTransportAdapter::HandleTimeout(uint32_t connectionId, uint32_t sequence)
         return;
     }
     NotifyTimeout(connectionId, sequence);
+    UpdateEvState(connectionId, pending->second.pathId, MrcEvState::ASSUMED_BAD);
     SendReliabilityProbe(connectionId, pending->second.pathId);
     ++pending->second.retransmissions;
     pending->second.fastRetransmitted = false;
@@ -1303,6 +1481,10 @@ MrcTransportAdapter::DoDispose()
         {
             (void)sequence;
             pending.timeout.Cancel();
+        }
+        for (auto& path : state.paths)
+        {
+            path.evTimer.Cancel();
         }
     }
     m_connections.clear();

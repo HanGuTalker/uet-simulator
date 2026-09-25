@@ -57,6 +57,10 @@ MRC-specific headers and state remain in the `mrc` module.
   the peer's 32-bit reachable-port mask. These best-effort exchanges consume no QP PSNs and are
   not retransmitted. A configurable response timeout marks an unresponsive EV path unreachable
   and releases request state.
+- Per-QP EV state tracking for `GOOD`, `DENIED`, `SKIP` and `ASSUMED_BAD`. Data scheduling selects
+  only `GOOD` EVs; ECN or trim feedback temporarily skips an EV, timeouts quarantine it, and
+  periodic EV Probes restore a recovered path to `GOOD`. Operator-denied EVs remain inactive until
+  explicitly re-enabled.
 - Per-QP, sender-side, SACK-clocked NSCC. Reflected 128 ns timestamps provide RTT samples, SETH `m`
   carries ECN feedback, and the controller applies fair additive increase, bounded multiplicative
   decrease and a one-nominal-packet minimum window.
@@ -69,8 +73,9 @@ a simulation mapping and is not presented as a verbs API.
 ## Deferred MRC functions
 
 - Negotiated connection parameters and controller-driven endpoint discovery.
-- The complete EV recovery state machine, Structured EV and SRv6 entropy formats. The current
-  endpoint response reflects timestamps without service-time compensation.
+- Structured EV and SRv6 entropy formats. The current endpoint response reflects timestamps
+  without service-time compensation. Path-health state is shared only through the simulator API,
+  not the complete MRC Controller API.
 - Memory registration/protection enforcement and complete verbs queue semantics.
 - Full verbs-driven QP lifecycle, work-completion syndromes and the remaining RC memory/protection
   error paths.
@@ -101,7 +106,8 @@ regression suite:
   goodput was 58.077 Gbit/s and mean latency was 152.310 us.
 - two-node 800 Gbit/s Endpoint Operations exchange: EV Probe request/response produced a positive
   RTT sample, Port Status Update reflected a `0xa5` port mask into peer state, and a subsequent
-  unanswered EV Probe marked the path unreachable after the configured timeout without consuming
-  connection PSNs.
+  unanswered EV Probe moved the EV to `ASSUMED_BAD`. After the responder returned, the periodic
+  recovery probe restored reachability and the EV's `GOOD` state without consuming connection
+  PSNs.
 
 These runs are functional smoke checks. They are not tuned performance comparisons.

@@ -158,7 +158,7 @@ class MrcEndpointOperationsTestCase : public TestCase
 {
   public:
     MrcEndpointOperationsTestCase()
-        : TestCase("MRC EV Probe and Port Status Update complete without QP state")
+        : TestCase("MRC Endpoint Operations drive the per-QP EV recovery state machine")
     {
     }
 
@@ -189,7 +189,22 @@ class MrcEndpointOperationsTestCase : public TestCase
         NS_TEST_ASSERT_MSG_EQ(first->AddPeer(2, interfaces.GetAddress(1)), true, "first peer");
         NS_TEST_ASSERT_MSG_EQ(second->AddPeer(1, interfaces.GetAddress(0)), true, "second peer");
         first->SetAttribute("EndpointResponseTimeout", TimeValue(MicroSeconds(10)));
+        first->SetAttribute("EvRecoveryProbeInterval", TimeValue(MicroSeconds(10)));
+        AiTransportConnectionConfig connectionConfig;
+        connectionConfig.remoteEndpointId = 2;
+        const uint32_t connectionId = first->OpenConnection(connectionConfig);
+        NS_TEST_ASSERT_MSG_NE(connectionId, 0, "connection open failed");
+        NS_TEST_EXPECT_MSG_EQ(static_cast<uint8_t>(first->GetEvState(connectionId, 0)),
+                              static_cast<uint8_t>(MrcEvState::GOOD),
+                              "EV did not start GOOD");
+        NS_TEST_EXPECT_MSG_EQ(first->SetEvDenied(connectionId, 0, true), true, "deny EV failed");
+        NS_TEST_EXPECT_MSG_EQ(static_cast<uint8_t>(first->GetEvState(connectionId, 0)),
+                              static_cast<uint8_t>(MrcEvState::DENIED),
+                              "EV did not enter DENIED");
+        NS_TEST_EXPECT_MSG_EQ(first->SetEvDenied(connectionId, 0, false), true, "allow EV failed");
         uint32_t observedPortMask = 0;
+        MrcEvState stateAfterTimeout = MrcEvState::GOOD;
+        Ptr<MrcTransportAdapter> recovered;
 
         Simulator::Schedule(NanoSeconds(1), [first]() { first->SendEvProbe(2, 3); });
         Simulator::Schedule(NanoSeconds(1),
@@ -200,12 +215,36 @@ class MrcEndpointOperationsTestCase : public TestCase
                                 second->Dispose();
                             });
         Simulator::Schedule(MicroSeconds(6), [first]() { first->SendEvProbe(2, 3); });
-        Simulator::Stop(MicroSeconds(20));
+        Simulator::Schedule(MicroSeconds(18),
+                            [first, connectionId, &stateAfterTimeout]() {
+                                stateAfterTimeout = first->GetEvState(connectionId, 3);
+                            });
+        Simulator::Schedule(MicroSeconds(22),
+                            [this, &recovered, &nodes, &secondConfig, &interfaces]() {
+                                recovered = CreateObject<MrcTransportAdapter>();
+                                NS_TEST_ASSERT_MSG_EQ(recovered->Initialize(nodes.Get(1), secondConfig),
+                                                      true,
+                                                      "recovered init");
+                                NS_TEST_ASSERT_MSG_EQ(recovered->AddPeer(1, interfaces.GetAddress(0)),
+                                                      true,
+                                                      "recovered peer");
+                            });
+        Simulator::Stop(MicroSeconds(35));
         Simulator::Run();
 
-        NS_TEST_EXPECT_MSG_EQ(first->IsPathReachable(2, 3), false, "EV timeout did not fail path");
+        NS_TEST_EXPECT_MSG_EQ(static_cast<uint8_t>(stateAfterTimeout),
+                              static_cast<uint8_t>(MrcEvState::ASSUMED_BAD),
+                              "EV timeout did not enter ASSUMED_BAD");
+        NS_TEST_EXPECT_MSG_EQ(first->IsPathReachable(2, 3), true, "EV probe did not recover path");
+        NS_TEST_EXPECT_MSG_EQ(static_cast<uint8_t>(first->GetEvState(connectionId, 3)),
+                              static_cast<uint8_t>(MrcEvState::GOOD),
+                              "EV probe did not restore GOOD");
         NS_TEST_EXPECT_MSG_GT(first->GetPathRtt(2, 3).GetNanoSeconds(), 0, "EV RTT is missing");
         NS_TEST_EXPECT_MSG_EQ(observedPortMask, 0xa5, "Port mask changed");
+        if (recovered)
+        {
+            recovered->Dispose();
+        }
         Simulator::Destroy();
     }
 };
