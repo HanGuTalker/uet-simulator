@@ -49,7 +49,7 @@ FalconBaseHeader::Serialize(Buffer::Iterator i) const
     NS_ASSERT_MSG(static_cast<uint8_t>(m_packetType) <= 0xf,
                   "Falcon packet type exceeds four bits");
 
-    i.WriteHtonU32((static_cast<uint32_t>(m_version) << 24) | m_destinationConnectionId);
+    i.WriteHtonU32((static_cast<uint32_t>(m_version) << 28) | m_destinationConnectionId);
     i.WriteU8((m_destinationFunction >> 16) & 0xff);
     i.WriteU8((m_destinationFunction >> 8) & 0xff);
     i.WriteU8(m_destinationFunction & 0xff);
@@ -65,7 +65,8 @@ uint32_t
 FalconBaseHeader::Deserialize(Buffer::Iterator i)
 {
     const uint32_t connection = i.ReadNtohU32();
-    m_version = connection >> 24;
+    m_version = connection >> 28;
+    m_reservedVersion = (connection >> 24) & 0xf;
     m_destinationConnectionId = connection & 0xffffff;
     m_destinationFunction = (static_cast<uint32_t>(i.ReadU8()) << 16) |
                             (static_cast<uint32_t>(i.ReadU8()) << 8) | i.ReadU8();
@@ -101,6 +102,12 @@ uint8_t
 FalconBaseHeader::GetVersion() const
 {
     return m_version;
+}
+
+bool
+FalconBaseHeader::HasValidReservedField() const
+{
+    return m_reservedVersion == 0;
 }
 
 void
@@ -214,12 +221,14 @@ FalconBaseHeader::GetRequestSequenceNumber() const
 void
 FalconPushDataHeader::Serialize(Buffer::Iterator i) const
 {
+    i.WriteHtonU16(0);
     i.WriteHtonU16(m_requestLength);
 }
 
 uint32_t
 FalconPushDataHeader::Deserialize(Buffer::Iterator i)
 {
+    m_reserved = i.ReadNtohU16();
     m_requestLength = i.ReadNtohU16();
     return SERIALIZED_SIZE;
 }
@@ -227,7 +236,7 @@ FalconPushDataHeader::Deserialize(Buffer::Iterator i)
 void
 FalconPushDataHeader::Print(std::ostream& os) const
 {
-    os << "request-length=" << m_requestLength;
+    os << "reserved=" << m_reserved << " request-length=" << m_requestLength;
 }
 
 void
@@ -242,9 +251,16 @@ FalconPushDataHeader::GetRequestLength() const
     return m_requestLength;
 }
 
+bool
+FalconPushDataHeader::HasValidReservedField() const
+{
+    return m_reserved == 0;
+}
+
 void
 FalconPullRequestHeader::Serialize(Buffer::Iterator i) const
 {
+    i.WriteHtonU16(0);
     i.WriteHtonU16(m_requestLength);
     i.WriteHtonU32(0);
 }
@@ -252,15 +268,17 @@ FalconPullRequestHeader::Serialize(Buffer::Iterator i) const
 uint32_t
 FalconPullRequestHeader::Deserialize(Buffer::Iterator i)
 {
+    m_reservedPrefix = i.ReadNtohU16();
     m_requestLength = i.ReadNtohU16();
-    m_reserved = i.ReadNtohU32();
+    m_reservedSuffix = i.ReadNtohU32();
     return SERIALIZED_SIZE;
 }
 
 void
 FalconPullRequestHeader::Print(std::ostream& os) const
 {
-    os << "request-length=" << m_requestLength << " reserved=" << m_reserved;
+    os << "reserved-prefix=" << m_reservedPrefix << " request-length=" << m_requestLength
+       << " reserved-suffix=" << m_reservedSuffix;
 }
 
 void
@@ -278,7 +296,7 @@ FalconPullRequestHeader::GetRequestLength() const
 bool
 FalconPullRequestHeader::HasValidReservedField() const
 {
-    return m_reserved == 0;
+    return m_reservedPrefix == 0 && m_reservedSuffix == 0;
 }
 
 #undef FALCON_HEADER_TYPEID

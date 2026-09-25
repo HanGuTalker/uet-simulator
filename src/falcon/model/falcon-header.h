@@ -13,14 +13,14 @@
 namespace ns3
 {
 
-/** OCP Falcon 1.0 upper-layer protocol encodings. */
+/** OCP Falcon 1.1 upper-layer protocol encodings. */
 enum class FalconProtocolType : uint8_t
 {
     RDMA = 0x2,
     NVME = 0x3,
 };
 
-/** OCP Falcon 1.0 packet type encodings. */
+/** OCP Falcon 1.1 packet type encodings. */
 enum class FalconPacketType : uint8_t
 {
     PULL_REQUEST = 0x0,
@@ -52,6 +52,7 @@ class FalconBaseHeader : public Header
 
     void SetVersion(uint8_t value);
     uint8_t GetVersion() const;
+    bool HasValidReservedField() const;
     void SetDestinationConnectionId(uint32_t value);
     uint32_t GetDestinationConnectionId() const;
     void SetDestinationFunction(uint32_t value);
@@ -73,6 +74,7 @@ class FalconBaseHeader : public Header
 
   private:
     uint8_t m_version{VERSION_1};
+    uint8_t m_reservedVersion{0};
     uint32_t m_destinationConnectionId{0};
     uint32_t m_destinationFunction{0};
     FalconProtocolType m_protocolType{FalconProtocolType::RDMA};
@@ -84,31 +86,11 @@ class FalconBaseHeader : public Header
     uint32_t m_requestSequenceNumber{0};
 };
 
-/** Two-byte request length immediately following a Push Data base header. */
+/** Four-byte Push Data suffix: reserved zero followed by request length. */
 class FalconPushDataHeader : public Header
 {
   public:
-    static constexpr uint32_t SERIALIZED_SIZE = 2;
-
-    static TypeId GetTypeId();
-    TypeId GetInstanceTypeId() const override;
-    uint32_t GetSerializedSize() const override;
-    void Serialize(Buffer::Iterator start) const override;
-    uint32_t Deserialize(Buffer::Iterator start) override;
-    void Print(std::ostream& os) const override;
-
-    void SetRequestLength(uint16_t value);
-    uint16_t GetRequestLength() const;
-
-  private:
-    uint16_t m_requestLength{0};
-};
-
-/** Six-byte Pull Request suffix: request length followed by the reserved zero field. */
-class FalconPullRequestHeader : public Header
-{
-  public:
-    static constexpr uint32_t SERIALIZED_SIZE = 6;
+    static constexpr uint32_t SERIALIZED_SIZE = 4;
 
     static TypeId GetTypeId();
     TypeId GetInstanceTypeId() const override;
@@ -122,8 +104,31 @@ class FalconPullRequestHeader : public Header
     bool HasValidReservedField() const;
 
   private:
+    uint16_t m_reserved{0};
     uint16_t m_requestLength{0};
-    uint32_t m_reserved{0};
+};
+
+/** Eight-byte Pull Request suffix: reserved, request length, then another reserved field. */
+class FalconPullRequestHeader : public Header
+{
+  public:
+    static constexpr uint32_t SERIALIZED_SIZE = 8;
+
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
+    void Print(std::ostream& os) const override;
+
+    void SetRequestLength(uint16_t value);
+    uint16_t GetRequestLength() const;
+    bool HasValidReservedField() const;
+
+  private:
+    uint16_t m_reservedPrefix{0};
+    uint16_t m_requestLength{0};
+    uint32_t m_reservedSuffix{0};
 };
 
 } // namespace ns3

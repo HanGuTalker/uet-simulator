@@ -99,6 +99,7 @@ active-EV selection with `GOOD`, `DENIED`, `SKIP` and `ASSUMED_BAD` recovery sta
 specification-required out-of-band QP attribute setup.
 Its implemented and deferred functions are documented in `docs/transport/mrc-model.md`.
 
-The Falcon module has entered phase P0 with the OCP Falcon 1.0 base, Push Data and Pull Request
-wire layouts plus byte-level serialization tests. It is not registered with the workload driver
-until the reliable packet-delivery adapter is available; see `docs/transport/falcon-model.md`.
+The Falcon module has entered phase P1 with the OCP Falcon 1.1 base, Push Data, Pull Request,
+BACK, EACK and NACK wire layouts plus byte-level serialization tests. It is not registered with
+the workload driver until the reliable packet-delivery adapter is available; see
+`docs/transport/falcon-model.md`.
