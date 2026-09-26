@@ -42,6 +42,12 @@ class FalconSimulationTag : public Tag
     uint32_t GetFragment() const;
     void SetFragmentCount(uint32_t value);
     uint32_t GetFragmentCount() const;
+    void SetPacketTxTimeNs(uint64_t value);
+    uint64_t GetPacketTxTimeNs() const;
+    void SetPacketRxTimeNs(uint64_t value);
+    uint64_t GetPacketRxTimeNs() const;
+    void SetAckTxTimeNs(uint64_t value);
+    uint64_t GetAckTxTimeNs() const;
 
   private:
     uint32_t m_sourceEndpointId{0};
@@ -53,6 +59,9 @@ class FalconSimulationTag : public Tag
     uint64_t m_submittedTimeNs{0};
     uint32_t m_fragment{0};
     uint32_t m_fragmentCount{0};
+    uint64_t m_packetTxTimeNs{0};
+    uint64_t m_packetRxTimeNs{0};
+    uint64_t m_ackTxTimeNs{0};
 };
 
 } // namespace ns3

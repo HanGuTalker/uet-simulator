@@ -60,8 +60,7 @@ bool
 FalconTransportAdapter::Initialize(Ptr<Node> node, const AiTransportEndpointConfig& config)
 {
     if (!node || m_socket || config.endpointId == 0 || config.payloadMtuBytes == 0 ||
-        config.payloadMtuBytes > std::numeric_limits<uint16_t>::max() ||
-        config.lineRateBps == 0)
+        config.payloadMtuBytes > std::numeric_limits<uint16_t>::max() || config.lineRateBps == 0)
     {
         return false;
     }
@@ -108,6 +107,22 @@ FalconTransportAdapter::OpenConnection(const AiTransportConnectionConfig& config
         config.initialWindowBytes == 0 ? m_config.initialWindowBytes : config.initialWindowBytes;
     state.rateBps = config.lineRateBps == 0 ? m_config.lineRateBps : config.lineRateBps;
     state.retransmissionTimeout = config.retransmissionTimeout;
+    FalconSwiftConfig swiftConfig;
+    swiftConfig.baseDelayTarget = m_config.targetQueueDelay;
+    swiftConfig.maxFcwnd =
+        std::max(1.0,
+                 static_cast<double>(m_config.maximumWindowBytes) /
+                     (m_config.payloadMtuBytes + FalconBaseHeader::SERIALIZED_SIZE +
+                      FalconPushDataHeader::SERIALIZED_SIZE));
+    swiftConfig.maxNcwnd = swiftConfig.maxFcwnd;
+    swiftConfig.minRetransmissionTimeout = std::min(config.retransmissionTimeout, m_config.baseRtt);
+    state.swift = FalconSwift(swiftConfig);
+    const double initialPackets =
+        std::max(1.0,
+                 static_cast<double>(state.congestionWindow) /
+                     (m_config.payloadMtuBytes + FalconBaseHeader::SERIALIZED_SIZE +
+                      FalconPushDataHeader::SERIALIZED_SIZE));
+    state.swift.Initialize(initialPackets, initialPackets, m_config.baseRtt);
     m_connections.emplace(connectionId, std::move(state));
     return connectionId;
 }
@@ -137,8 +152,8 @@ FalconTransportAdapter::Submit(const AiTransportRequest& request)
         PendingPacket pending;
         pending.payload = request.payload->CreateFragment(offset, bytes);
         pending.psn = psn;
-        pending.wireBytes = bytes + FalconBaseHeader::SERIALIZED_SIZE +
-                            FalconPushDataHeader::SERIALIZED_SIZE;
+        pending.wireBytes =
+            bytes + FalconBaseHeader::SERIALIZED_SIZE + FalconPushDataHeader::SERIALIZED_SIZE;
         pending.tag.SetSourceEndpointId(m_config.endpointId);
         pending.tag.SetDestinationEndpointId(request.remoteEndpointId);
         pending.tag.SetConnectionId(request.connectionId);
@@ -161,7 +176,7 @@ uint32_t
 FalconTransportAdapter::GetCongestionWindow(uint32_t connectionId) const
 {
     const auto found = m_connections.find(connectionId);
-    return found == m_connections.end() ? 0 : found->second.congestionWindow;
+    return found == m_connections.end() ? 0 : GetSwiftWindowBytes(found->second);
 }
 
 bool
@@ -172,11 +187,12 @@ FalconTransportAdapter::SetCongestionWindow(uint32_t connectionId, uint32_t byte
     {
         return false;
     }
-    const uint32_t old = found->second.congestionWindow;
+    const uint32_t old = GetSwiftWindowBytes(found->second);
     found->second.congestionWindow = bytes;
-    if (old != bytes)
+    const uint32_t current = GetSwiftWindowBytes(found->second);
+    if (old != current)
     {
-        NotifyCongestionWindow(connectionId, old, bytes);
+        NotifyCongestionWindow(connectionId, old, current);
     }
     TryTransmit(connectionId);
     return true;
@@ -194,9 +210,23 @@ FalconTransportAdapter::SetConnectionRate(uint32_t connectionId, uint64_t rateBp
     return true;
 }
 
-bool FalconTransportAdapter::ConfigureJobScheduler(uint64_t) { return false; }
-bool FalconTransportAdapter::AssignConnectionToJob(uint32_t, uint32_t, uint32_t) { return false; }
-AiTransportCounters FalconTransportAdapter::GetCounters() const { return m_counters; }
+bool
+FalconTransportAdapter::ConfigureJobScheduler(uint64_t)
+{
+    return false;
+}
+
+bool
+FalconTransportAdapter::AssignConnectionToJob(uint32_t, uint32_t, uint32_t)
+{
+    return false;
+}
+
+AiTransportCounters
+FalconTransportAdapter::GetCounters() const
+{
+    return m_counters;
+}
 
 void
 FalconTransportAdapter::TryTransmit(uint32_t connectionId)
@@ -207,6 +237,8 @@ FalconTransportAdapter::TryTransmit(uint32_t connectionId)
         return;
     }
     auto& state = found->second;
+    const uint32_t swiftPackets =
+        std::max(1u, static_cast<uint32_t>(state.swift.GetEffectiveWindow()));
     while (!state.transmitQueue.empty())
     {
         const uint32_t psn = state.transmitQueue.front();
@@ -216,12 +248,14 @@ FalconTransportAdapter::TryTransmit(uint32_t connectionId)
             state.transmitQueue.pop_front();
             continue;
         }
-        if (state.inflightBytes + pending->second.wireBytes > state.congestionWindow)
+        if (state.inflightBytes + pending->second.wireBytes > state.congestionWindow ||
+            state.inflightPackets >= swiftPackets)
         {
             break;
         }
         state.transmitQueue.pop_front();
         state.inflightBytes += pending->second.wireBytes;
+        ++state.inflightPackets;
         pending->second.sent = true;
         const Time sendAt = std::max(Simulator::Now(), state.nextSend);
         Simulator::Schedule(sendAt - Simulator::Now(),
@@ -231,9 +265,12 @@ FalconTransportAdapter::TryTransmit(uint32_t connectionId)
                             psn,
                             false);
         const uint64_t rate = std::max<uint64_t>(1, state.rateBps);
-        const uint64_t serializationNs = std::max<uint64_t>(
+        uint64_t serializationNs = std::max<uint64_t>(
             1,
             (static_cast<uint64_t>(pending->second.wireBytes) * 8000000000ULL + rate - 1) / rate);
+        serializationNs = std::max<uint64_t>(
+            serializationNs,
+            std::max<int64_t>(0, state.swift.GetInterPacketGap().GetNanoSeconds()));
         state.nextSend = sendAt + NanoSeconds(serializationNs);
     }
 }
@@ -267,10 +304,13 @@ FalconTransportAdapter::Transmit(uint32_t connectionId, uint32_t psn, bool retra
     {
         NotifyRetransmission(connectionId, psn);
     }
-    SendWire(packet, pending->second.tag, connectionId);
+    FalconSimulationTag outgoing = pending->second.tag;
+    outgoing.SetPacketTxTimeNs(Simulator::Now().GetNanoSeconds());
+    SendWire(packet, outgoing, connectionId);
     pending->second.timeout.Cancel();
-    const Time timeout = found->second.retransmissionTimeout *
-                         (1ULL << std::min(pending->second.retransmissions, 6u));
+    const Time baseTimeout = std::max(found->second.retransmissionTimeout,
+                                      found->second.swift.GetRetransmissionTimeout());
+    const Time timeout = baseTimeout * (1ULL << std::min(pending->second.retransmissions, 6u));
     pending->second.timeout = Simulator::Schedule(timeout,
                                                   &FalconTransportAdapter::HandleTimeout,
                                                   this,
@@ -349,8 +389,8 @@ FalconTransportAdapter::ReceiverKey(uint32_t endpointId, uint32_t connectionId) 
 void
 FalconTransportAdapter::ReceiveData(Ptr<Packet> packet, const FalconSimulationTag& tag)
 {
-    if (packet->GetSize() < FalconBaseHeader::SERIALIZED_SIZE +
-                                FalconPushDataHeader::SERIALIZED_SIZE)
+    if (packet->GetSize() <
+        FalconBaseHeader::SERIALIZED_SIZE + FalconPushDataHeader::SERIALIZED_SIZE)
     {
         ++m_counters.integrityDrops;
         return;
@@ -401,13 +441,22 @@ void
 FalconTransportAdapter::SendEack(const FalconSimulationTag& received,
                                  FalconReliabilityManager& reliability)
 {
+    const uint64_t receiveTimeNs = Simulator::Now().GetNanoSeconds();
+    constexpr uint64_t TIMESTAMP_UNIT_PS = 131072;
+    const uint32_t timestamp1 = static_cast<uint32_t>(
+        (received.GetPacketTxTimeNs() * 1000ULL / TIMESTAMP_UNIT_PS) & 0xffffffff);
+    const uint32_t timestamp2 =
+        static_cast<uint32_t>((receiveTimeNs * 1000ULL / TIMESTAMP_UNIT_PS) & 0xffffffff);
     Ptr<Packet> packet = Create<Packet>();
-    packet->AddHeader(reliability.BuildEack(received.GetConnectionId()));
+    packet->AddHeader(reliability.BuildEack(received.GetConnectionId(), timestamp1, timestamp2));
     FalconSimulationTag response;
     response.SetSourceEndpointId(m_config.endpointId);
     response.SetDestinationEndpointId(received.GetSourceEndpointId());
     response.SetConnectionId(received.GetConnectionId());
     response.SetMessageId(received.GetMessageId());
+    response.SetPacketTxTimeNs(received.GetPacketTxTimeNs());
+    response.SetPacketRxTimeNs(receiveTimeNs);
+    response.SetAckTxTimeNs(Simulator::Now().GetNanoSeconds());
     SendWire(packet, response, received.GetConnectionId());
 }
 
@@ -444,7 +493,23 @@ FalconTransportAdapter::ReceiveControl(Ptr<Packet> packet,
         FalconEackHeader eack;
         packet->RemoveHeader(eack);
         ++m_counters.selectiveAcknowledgments;
-        RetireAcknowledged(tag.GetConnectionId(), found->second.reliability.ProcessEack(eack));
+        const std::vector<uint32_t> acknowledged = found->second.reliability.ProcessEack(eack);
+        const uint64_t nowNs = Simulator::Now().GetNanoSeconds();
+        if (tag.GetPacketTxTimeNs() <= nowNs && tag.GetPacketRxTimeNs() <= tag.GetAckTxTimeNs())
+        {
+            const Time rtt = NanoSeconds(nowNs - tag.GetPacketTxTimeNs());
+            const Time remoteResidence =
+                NanoSeconds(tag.GetAckTxTimeNs() - tag.GetPacketRxTimeNs());
+            const Time fabricDelay = rtt > remoteResidence ? rtt - remoteResidence : NanoSeconds(0);
+            const uint32_t oldWindow = GetSwiftWindowBytes(found->second);
+            found->second.swift.ProcessAck(Simulator::Now(),
+                                           rtt,
+                                           fabricDelay,
+                                           acknowledged.size(),
+                                           0);
+            NotifySwiftWindowChange(tag.GetConnectionId(), oldWindow);
+        }
+        RetireAcknowledged(tag.GetConnectionId(), acknowledged);
     }
     else if (type == FalconPacketType::BACK &&
              packet->GetSize() >= FalconBackHeader::SERIALIZED_SIZE)
@@ -466,6 +531,20 @@ FalconTransportAdapter::ReceiveControl(Ptr<Packet> packet,
             if (pending != found->second.pending.end() &&
                 pending->second.retransmissions < m_config.maxRetransmissions)
             {
+                const uint32_t oldWindow = GetSwiftWindowBytes(found->second);
+                if (nack.GetNackCode() == FalconNackCode::RESOURCE_EXHAUSTION)
+                {
+                    found->second.swift.ProcessResourceExhaustionNack(Simulator::Now(),
+                                                                      m_config.baseRtt,
+                                                                      m_config.baseRtt,
+                                                                      0,
+                                                                      31);
+                }
+                else
+                {
+                    found->second.swift.ProcessRetransmit(Simulator::Now());
+                }
+                NotifySwiftWindowChange(tag.GetConnectionId(), oldWindow);
                 ++pending->second.retransmissions;
                 ++m_counters.fastRetransmissions;
                 Transmit(tag.GetConnectionId(), psn, true);
@@ -494,6 +573,10 @@ FalconTransportAdapter::RetireAcknowledged(uint32_t connectionId,
         state.inflightBytes = state.inflightBytes > pending->second.wireBytes
                                   ? state.inflightBytes - pending->second.wireBytes
                                   : 0;
+        if (state.inflightPackets > 0)
+        {
+            --state.inflightPackets;
+        }
         state.pending.erase(pending);
     }
     TryTransmit(connectionId);
@@ -514,8 +597,36 @@ FalconTransportAdapter::HandleTimeout(uint32_t connectionId, uint32_t psn)
         return;
     }
     NotifyTimeout(connectionId, psn);
+    const uint32_t oldWindow = GetSwiftWindowBytes(found->second);
+    found->second.swift.ProcessRetransmit(Simulator::Now());
+    NotifySwiftWindowChange(connectionId, oldWindow);
     ++pending->second.retransmissions;
     Transmit(connectionId, psn, true);
+}
+
+uint32_t
+FalconTransportAdapter::GetSwiftWindowBytes(const ConnectionState& state) const
+{
+    const double packets = std::max(1.0, state.swift.GetEffectiveWindow());
+    const uint64_t bytes = static_cast<uint64_t>(packets) *
+                           (m_config.payloadMtuBytes + FalconBaseHeader::SERIALIZED_SIZE +
+                            FalconPushDataHeader::SERIALIZED_SIZE);
+    return static_cast<uint32_t>(std::min<uint64_t>(state.congestionWindow, bytes));
+}
+
+void
+FalconTransportAdapter::NotifySwiftWindowChange(uint32_t connectionId, uint32_t oldWindowBytes)
+{
+    const auto found = m_connections.find(connectionId);
+    if (found == m_connections.end())
+    {
+        return;
+    }
+    const uint32_t newWindowBytes = GetSwiftWindowBytes(found->second);
+    if (oldWindowBytes != newWindowBytes)
+    {
+        NotifyCongestionWindow(connectionId, oldWindowBytes, newWindowBytes);
+    }
 }
 
 void

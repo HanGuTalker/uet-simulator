@@ -8,6 +8,7 @@
 
 #include "falcon-reliability.h"
 #include "falcon-simulation-tag.h"
+#include "falcon-swift.h"
 
 #include "ns3/ai-transport-endpoint.h"
 #include "ns3/event-id.h"
@@ -51,6 +52,7 @@ class FalconTransportAdapter : public AiTransportEndpoint
         Address address;
         uint16_t port{UDP_PORT};
     };
+
     struct PendingPacket
     {
         Ptr<Packet> payload;
@@ -61,22 +63,27 @@ class FalconTransportAdapter : public AiTransportEndpoint
         bool sent{false};
         EventId timeout;
     };
+
     struct ConnectionState
     {
         explicit ConnectionState(uint32_t initialPsn = 0)
             : reliability(initialPsn, initialPsn)
         {
         }
+
         uint32_t remoteEndpointId{0};
         uint32_t congestionWindow{65536};
         uint32_t inflightBytes{0};
+        uint32_t inflightPackets{0};
         uint64_t rateBps{0};
         Time retransmissionTimeout{MicroSeconds(50)};
         Time nextSend{Seconds(0)};
         FalconReliabilityManager reliability;
+        FalconSwift swift;
         std::deque<uint32_t> transmitQueue;
         std::map<uint32_t, PendingPacket> pending;
     };
+
     struct ReceiveMessage
     {
         uint32_t totalBytes{0};
@@ -88,9 +95,7 @@ class FalconTransportAdapter : public AiTransportEndpoint
     void DoDispose() override;
     void Receive(Ptr<Socket> socket);
     void ReceiveData(Ptr<Packet> packet, const FalconSimulationTag& tag);
-    void ReceiveControl(Ptr<Packet> packet,
-                        const FalconSimulationTag& tag,
-                        FalconPacketType type);
+    void ReceiveControl(Ptr<Packet> packet, const FalconSimulationTag& tag, FalconPacketType type);
     void TryTransmit(uint32_t connectionId);
     void Transmit(uint32_t connectionId, uint32_t psn, bool retransmission);
     void HandleTimeout(uint32_t connectionId, uint32_t psn);
@@ -98,6 +103,8 @@ class FalconTransportAdapter : public AiTransportEndpoint
     void SendEack(const FalconSimulationTag& received, FalconReliabilityManager& reliability);
     void SendNack(const FalconSimulationTag& received, uint32_t psn);
     void RetireAcknowledged(uint32_t connectionId, const std::vector<uint32_t>& acknowledged);
+    uint32_t GetSwiftWindowBytes(const ConnectionState& state) const;
+    void NotifySwiftWindowChange(uint32_t connectionId, uint32_t oldWindowBytes);
     uint64_t ReceiverKey(uint32_t endpointId, uint32_t connectionId) const;
 
     Ptr<Node> m_node;
