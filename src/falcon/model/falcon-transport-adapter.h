@@ -17,11 +17,13 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <vector>
 
 namespace ns3
 {
 
 class Socket;
+class UniformRandomVariable;
 
 /** Falcon 1.1 comparison data path using Push Data, EACK and NACK. */
 class FalconTransportAdapter : public AiTransportEndpoint
@@ -76,6 +78,7 @@ class FalconTransportAdapter : public AiTransportEndpoint
         uint32_t inflightBytes{0};
         uint32_t inflightPackets{0};
         uint64_t rateBps{0};
+        uint32_t currentPathId{0};
         Time retransmissionTimeout{MicroSeconds(50)};
         Time nextSend{Seconds(0)};
         FalconReliabilityManager reliability;
@@ -99,19 +102,29 @@ class FalconTransportAdapter : public AiTransportEndpoint
     void TryTransmit(uint32_t connectionId);
     void Transmit(uint32_t connectionId, uint32_t psn, bool retransmission);
     void HandleTimeout(uint32_t connectionId, uint32_t psn);
-    bool SendWire(Ptr<Packet> packet, const FalconSimulationTag& tag, uint32_t connectionId);
+    bool SendWire(Ptr<Packet> packet,
+                  const FalconSimulationTag& tag,
+                  uint32_t connectionId,
+                  uint32_t sequenceNumber);
     void SendEack(const FalconSimulationTag& received, FalconReliabilityManager& reliability);
     void SendNack(const FalconSimulationTag& received, uint32_t psn);
     void RetireAcknowledged(uint32_t connectionId, const std::vector<uint32_t>& acknowledged);
     uint32_t GetSwiftWindowBytes(const ConnectionState& state) const;
     void NotifySwiftWindowChange(uint32_t connectionId, uint32_t oldWindowBytes);
+    void RandomizePath(ConnectionState& state);
     uint64_t ReceiverKey(uint32_t endpointId, uint32_t connectionId) const;
 
     Ptr<Node> m_node;
-    Ptr<Socket> m_socket;
+    Ptr<Socket> m_receiveSocket;
+    std::vector<Ptr<Socket>> m_pathSockets;
+    Ptr<UniformRandomVariable> m_pathRandom;
     AiTransportEndpointConfig m_config;
     uint32_t m_nextConnectionId{1};
     uint32_t m_pathMtu{9000};
+    uint32_t m_pathCount{4};
+    double m_plbTargetDelayMultiplier{1.5};
+    double m_plbCongestionThreshold{0.5};
+    uint32_t m_plbAttemptThreshold{3};
     std::unordered_map<uint32_t, Peer> m_peers;
     std::unordered_map<uint32_t, ConnectionState> m_connections;
     std::unordered_map<uint64_t, FalconReliabilityManager> m_receivers;

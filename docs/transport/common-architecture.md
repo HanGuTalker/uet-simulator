@@ -99,10 +99,11 @@ active-EV selection with `GOOD`, `DENIED`, `SKIP` and `ASSUMED_BAD` recovery sta
 specification-required out-of-band QP attribute setup.
 Its implemented and deferred functions are documented in `docs/transport/mrc-model.md`.
 
-The Falcon module has entered phase P4 with the OCP Falcon 1.1 base, Push Data, Pull Request,
+The Falcon module has entered phase P5 with the OCP Falcon 1.1 base, Push Data, Pull Request,
 BACK, EACK and NACK wire layouts, independent data/request reliability windows, a common
 reliable-unordered adapter and a comparison-oriented Swift/RUE subset. The congestion model uses
 four-timestamp RTT/fabric-delay feedback, dual windows, guarded additive-increase/proportional-
-decrease, retransmission response and sub-packet-window pacing. It is registered for MESSAGE,
-SEND and WRITE workload experiments; see `docs/transport/falcon-model.md` for the intentionally
-deferred functions.
+decrease, retransmission response and sub-packet-window pacing. Its PLB subset counts congested
+ACK fractions over effective-window RTT samples and changes IPv4 UDP source-port entropy after
+consecutive congested samples. It is registered for MESSAGE, SEND and WRITE workload experiments;
+see `docs/transport/falcon-model.md` for the intentionally deferred functions.

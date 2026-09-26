@@ -296,8 +296,7 @@ class AiWorkload
         transportFactory.Register(AiTransportProtocol::ROCEV2, RoceV2TransportAdapter::GetTypeId());
         transportFactory.Register(AiTransportProtocol::VEROCE, VeRoceTransportAdapter::GetTypeId());
         transportFactory.Register(AiTransportProtocol::MRC, MrcTransportAdapter::GetTypeId());
-        transportFactory.Register(AiTransportProtocol::FALCON,
-                                  FalconTransportAdapter::GetTypeId());
+        transportFactory.Register(AiTransportProtocol::FALCON, FalconTransportAdapter::GetTypeId());
         if (protocol == AiTransportProtocol::UNKNOWN || !transportFactory.IsRegistered(protocol))
         {
             std::cerr << "Transport '" << transportName
@@ -348,6 +347,9 @@ class AiWorkload
             m_endpoints[i]->TraceConnectWithoutContext(
                 "PayloadRx",
                 MakeBoundCallback(&AiWorkload::ReceiverPayloadSink, this));
+            m_endpoints[i]->TraceConnectWithoutContext(
+                "PathSelected",
+                MakeBoundCallback(&AiWorkload::PathSelectedSink, this, i + 1));
         }
         for (uint32_t i = 0; i < nodeCount; ++i)
         {
@@ -724,6 +726,15 @@ class AiWorkload
         uint32_t newBytes{0};
     };
 
+    struct PathSample
+    {
+        int64_t timeNs{0};
+        uint32_t source{0};
+        uint32_t pdcId{0};
+        uint32_t sequence{0};
+        uint32_t pathId{0};
+    };
+
     void SubmitMessage(uint32_t source,
                        uint32_t target,
                        uint32_t pdcId,
@@ -927,6 +938,17 @@ class AiWorkload
         workload->m_rxPayloadBins[sourceEndpointId][binNs] += payloadBytes;
     }
 
+    static void PathSelectedSink(AiWorkload* workload,
+                                 uint32_t source,
+                                 uint32_t pdcId,
+                                 uint32_t sequence,
+                                 uint32_t pathId)
+    {
+        workload->m_pathSamples.push_back(
+            {Simulator::Now().GetNanoSeconds(), source, pdcId, sequence, pathId});
+        ++workload->m_pathPacketCounts[pathId];
+    }
+
     void DeviceQueueDrop(Ptr<const Packet>)
     {
         ++m_deviceQueueDrops;
@@ -945,6 +967,7 @@ class AiWorkload
             m_fastRetransmissions += counters.fastRetransmissions;
             m_rttProbes += counters.rttProbes;
             m_slowPathSignals += counters.slowPathSignals;
+            m_pathReroutes += counters.pathReroutes;
         }
     }
 
@@ -1031,10 +1054,19 @@ class AiWorkload
         std::ofstream queue(base + "-queue.csv");
         std::ofstream throughput(base + "-throughput.csv");
         std::ofstream collectives(base + "-collectives.csv");
-        if (!messages || !summaries || !json || !cwnd || !queue || !throughput || !collectives)
+        std::ofstream paths(base + "-paths.csv");
+        if (!messages || !summaries || !json || !cwnd || !queue || !throughput || !collectives ||
+            !paths)
         {
             std::cerr << "Unable to create structured output with prefix " << base << std::endl;
             return false;
+        }
+
+        paths << "time_ns,source,pdc_id,sequence,path_id\n";
+        for (const auto& sample : m_pathSamples)
+        {
+            paths << sample.timeNs << ',' << sample.source << ',' << sample.pdcId << ','
+                  << sample.sequence << ',' << sample.pathId << '\n';
         }
 
         cwnd << "time_ns,source,pdc_id,old_cwnd_bytes,new_cwnd_bytes\n";
@@ -1109,8 +1141,8 @@ class AiWorkload
             "ns,"
             "goodput_bps,mean_latency_ns,p50_latency_ns,p95_latency_ns,p99_latency_ns,"
             "max_latency_ns,retransmissions,timeouts,nacks,ecn_marks,trimmed_packets,sack_packets,"
-            "fast_retransmissions,rtt_probes,slow_path_signals,tx_datagrams,"
-            "rx_datagrams,mtu_drops,crc_drops,device_queue_drops\n";
+            "fast_retransmissions,rtt_probes,slow_path_signals,path_reroutes,tx_datagrams,"
+            "rx_datagrams,mtu_drops,crc_drops,path_selections,active_paths,device_queue_drops\n";
         summaries << header << m_transportName << ',' << m_operationName << ',' << m_pattern << ','
                   << m_fabricType << ',' << m_linkRate << ',' << m_linkRateBps << ','
                   << m_linkDelayNs << ',' << m_queuePackets << ',' << m_nodeCount << ','
@@ -1135,11 +1167,12 @@ class AiWorkload
                   << ',' << m_timeouts << ',' << m_nacks << ',' << m_ecnMarks << ','
                   << m_trimmedPackets << ',' << m_selectiveAcknowledgments << ','
                   << m_fastRetransmissions << ',' << m_rttProbes << ',' << m_slowPathSignals << ','
-                  << m_txDatagrams << ',' << m_rxDatagrams << ',' << m_mtuDrops << ',' << m_crcDrops
-                  << ',' << m_deviceQueueDrops << '\n';
+                  << m_pathReroutes << ',' << m_txDatagrams << ',' << m_rxDatagrams << ','
+                  << m_mtuDrops << ',' << m_crcDrops << ',' << m_pathSamples.size() << ','
+                  << m_pathPacketCounts.size() << ',' << m_deviceQueueDrops << '\n';
 
         json << std::fixed << std::setprecision(3) << "{\n"
-             << "  \"schema_version\": 4,\n"
+             << "  \"schema_version\": 5,\n"
              << "  \"protocol\": \"" << m_transportName << "\",\n"
              << "  \"operation\": \"" << m_operationName << "\",\n"
              << "  \"pattern\": \"" << m_pattern << "\",\n"
@@ -1208,10 +1241,13 @@ class AiWorkload
              << ", \"sack_packets\": " << m_selectiveAcknowledgments
              << ", \"fast_retransmissions\": " << m_fastRetransmissions
              << ", \"rtt_probes\": " << m_rttProbes
-             << ", \"slow_path_signals\": " << m_slowPathSignals << "},\n"
+             << ", \"slow_path_signals\": " << m_slowPathSignals
+             << ", \"path_reroutes\": " << m_pathReroutes << "},\n"
              << "  \"transport\": {\"tx_datagrams\": " << m_txDatagrams
              << ", \"rx_datagrams\": " << m_rxDatagrams << ", \"mtu_drops\": " << m_mtuDrops
              << ", \"crc_drops\": " << m_crcDrops << "},\n"
+             << "  \"path_selection\": {\"selections\": " << m_pathSamples.size()
+             << ", \"active_paths\": " << m_pathPacketCounts.size() << "},\n"
              << "  \"device_queue_drops\": " << m_deviceQueueDrops << "\n"
              << "}\n";
         return true;
@@ -1236,7 +1272,7 @@ class AiWorkload
         }
         std::cout << "outputs: " << outputPrefix << '-' << m_pattern
                   << "-{messages.csv,collectives.csv,summary.csv,summary.json,cwnd.csv,queue.csv,"
-                     "throughput.csv}"
+                     "throughput.csv,paths.csv}"
                   << std::endl;
     }
 
@@ -1296,6 +1332,8 @@ class AiWorkload
     std::set<uint64_t> m_warmupIds;
     std::vector<CwndSample> m_cwndSamples;
     std::vector<QueueSample> m_queueSamples;
+    std::vector<PathSample> m_pathSamples;
+    std::map<uint32_t, uint64_t> m_pathPacketCounts;
     int64_t m_throughputBinNs{1000};
     std::map<uint32_t, std::map<int64_t, uint64_t>> m_rxPayloadBins;
     uint32_t m_warmupsAttempted{0};
@@ -1312,6 +1350,7 @@ class AiWorkload
     uint64_t m_fastRetransmissions{0};
     uint64_t m_rttProbes{0};
     uint64_t m_slowPathSignals{0};
+    uint64_t m_pathReroutes{0};
     uint64_t m_txDatagrams{0};
     uint64_t m_rxDatagrams{0};
     uint64_t m_mtuDrops{0};

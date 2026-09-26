@@ -52,6 +52,22 @@ class FalconSwiftTestCase : public TestCase
         NS_TEST_EXPECT_MSG_EQ_TOL(swift.GetFabricWindow(), 0.25, 0.0001, "limit did not collapse");
         NS_TEST_EXPECT_MSG_GT(swift.GetInterPacketGap(), MicroSeconds(20), "pacing not enabled");
         NS_TEST_EXPECT_MSG_EQ(swift.GetRetransmissionTimeout(), MicroSeconds(40), "Swift RTO");
+
+        config.maxFcwnd = 4.0;
+        config.maxNcwnd = 4.0;
+        config.plbTargetDelayMultiplier = 1.5;
+        config.plbCongestionThreshold = 0.5;
+        config.plbAttemptThreshold = 2;
+        FalconSwift plb(config);
+        plb.Initialize(1.0, 1.0, MicroSeconds(20));
+        NS_TEST_EXPECT_MSG_EQ(
+            plb.ProcessAck(MicroSeconds(20), MicroSeconds(20), MicroSeconds(20), 1, 0),
+            false,
+            "PLB rerouted before consecutive threshold");
+        NS_TEST_EXPECT_MSG_EQ(
+            plb.ProcessAck(MicroSeconds(40), MicroSeconds(20), MicroSeconds(20), 1, 0),
+            true,
+            "PLB did not reroute after congested RTTs");
     }
 };
 

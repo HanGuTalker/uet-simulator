@@ -31,6 +31,9 @@ struct FalconSwiftConfig
     double retransmitTimeoutScalar{2.0};
     uint32_t retransmitLimit{3};
     Time minRetransmissionTimeout{MicroSeconds(5)};
+    double plbTargetDelayMultiplier{1.5};
+    double plbCongestionThreshold{0.5};
+    uint32_t plbAttemptThreshold{3};
 };
 
 /** Configurable implementation of the Falcon 1.1 Swift pseudocode. */
@@ -40,7 +43,7 @@ class FalconSwift
     explicit FalconSwift(const FalconSwiftConfig& config = {});
 
     void Initialize(double fcwnd, double ncwnd, Time initialRtt);
-    void ProcessAck(Time now,
+    bool ProcessAck(Time now,
                     Time rtt,
                     Time fabricDelay,
                     uint32_t packetsAcknowledged,
@@ -72,6 +75,7 @@ class FalconSwift
     void UpdateFabricWindow(Time now, uint32_t packetsAcknowledged);
     void UpdateNicWindow(Time now, uint8_t rxBufferLevel, bool forceDecrease);
     void UpdateDerivedValues();
+    bool ComputePlb(double oldWindow, uint32_t packetsAcknowledged);
 
     FalconSwiftConfig m_config;
     double m_fcwnd{1.0};
@@ -84,6 +88,9 @@ class FalconSwift
     Time m_interPacketGap{Seconds(0)};
     Time m_retransmissionTimeout{MicroSeconds(50)};
     uint32_t m_retransmitCount{0};
+    uint32_t m_plbPacketsAcknowledged{0};
+    uint32_t m_plbCongestedPacketsAcknowledged{0};
+    uint32_t m_plbRerouteAttempts{0};
 };
 
 } // namespace ns3

@@ -5,9 +5,11 @@
 
 #include "falcon-transport-adapter.h"
 
+#include "ns3/double.h"
 #include "ns3/inet-socket-address.h"
 #include "ns3/ipv4-address.h"
 #include "ns3/node.h"
+#include "ns3/random-variable-stream.h"
 #include "ns3/simulator.h"
 #include "ns3/socket.h"
 #include "ns3/udp-socket-factory.h"
@@ -34,7 +36,27 @@ FalconTransportAdapter::GetTypeId()
                           "Maximum IPv4 datagram size for the Falcon comparison model.",
                           UintegerValue(9000),
                           MakeUintegerAccessor(&FalconTransportAdapter::m_pathMtu),
-                          MakeUintegerChecker<uint32_t>(576, 65535));
+                          MakeUintegerChecker<uint32_t>(576, 65535))
+            .AddAttribute("PathCount",
+                          "Number of IPv4 UDP source-port entropy paths available to PLB.",
+                          UintegerValue(4),
+                          MakeUintegerAccessor(&FalconTransportAdapter::m_pathCount),
+                          MakeUintegerChecker<uint32_t>(1, 64))
+            .AddAttribute("PlbTargetDelayMultiplier",
+                          "Delay-target multiplier above which an ACK is congested for PLB.",
+                          DoubleValue(1.5),
+                          MakeDoubleAccessor(&FalconTransportAdapter::m_plbTargetDelayMultiplier),
+                          MakeDoubleChecker<double>(1.0))
+            .AddAttribute("PlbCongestionThreshold",
+                          "Congested ACK fraction required to count a congested RTT.",
+                          DoubleValue(0.5),
+                          MakeDoubleAccessor(&FalconTransportAdapter::m_plbCongestionThreshold),
+                          MakeDoubleChecker<double>(0.0, 1.0))
+            .AddAttribute("PlbAttemptThreshold",
+                          "Consecutive congested RTT samples required before rerouting.",
+                          UintegerValue(3),
+                          MakeUintegerAccessor(&FalconTransportAdapter::m_plbAttemptThreshold),
+                          MakeUintegerChecker<uint32_t>(1));
     return tid;
 }
 
@@ -59,28 +81,40 @@ FalconTransportAdapter::GetCapabilities() const
 bool
 FalconTransportAdapter::Initialize(Ptr<Node> node, const AiTransportEndpointConfig& config)
 {
-    if (!node || m_socket || config.endpointId == 0 || config.payloadMtuBytes == 0 ||
+    if (!node || m_receiveSocket || config.endpointId == 0 || config.payloadMtuBytes == 0 ||
         config.payloadMtuBytes > std::numeric_limits<uint16_t>::max() || config.lineRateBps == 0)
     {
         return false;
     }
     m_node = node;
     m_config = config;
-    m_socket = Socket::CreateSocket(node, UdpSocketFactory::GetTypeId());
-    if (!m_socket || m_socket->Bind(InetSocketAddress(Ipv4Address::GetAny(), UDP_PORT)) != 0)
+    m_receiveSocket = Socket::CreateSocket(node, UdpSocketFactory::GetTypeId());
+    if (!m_receiveSocket ||
+        m_receiveSocket->Bind(InetSocketAddress(Ipv4Address::GetAny(), UDP_PORT)) != 0)
     {
-        m_socket = nullptr;
+        m_receiveSocket = nullptr;
         m_node = nullptr;
         return false;
     }
-    m_socket->SetRecvCallback(MakeCallback(&FalconTransportAdapter::Receive, this));
+    m_receiveSocket->SetRecvCallback(MakeCallback(&FalconTransportAdapter::Receive, this));
+    for (uint32_t path = 0; path < m_pathCount; ++path)
+    {
+        Ptr<Socket> socket = Socket::CreateSocket(node, UdpSocketFactory::GetTypeId());
+        if (!socket || socket->Bind() != 0)
+        {
+            DoDispose();
+            return false;
+        }
+        m_pathSockets.push_back(socket);
+    }
+    m_pathRandom = CreateObject<UniformRandomVariable>();
     return true;
 }
 
 bool
 FalconTransportAdapter::AddPeer(uint32_t endpointId, const Address& address)
 {
-    if (!m_socket || endpointId == 0 || !Ipv4Address::IsMatchingType(address))
+    if (!m_receiveSocket || endpointId == 0 || !Ipv4Address::IsMatchingType(address))
     {
         return false;
     }
@@ -91,7 +125,8 @@ FalconTransportAdapter::AddPeer(uint32_t endpointId, const Address& address)
 uint32_t
 FalconTransportAdapter::OpenConnection(const AiTransportConnectionConfig& config)
 {
-    if (!m_socket || config.remoteEndpointId == 0 || !m_peers.contains(config.remoteEndpointId) ||
+    if (!m_receiveSocket || config.remoteEndpointId == 0 ||
+        !m_peers.contains(config.remoteEndpointId) ||
         config.reliability != AiTransportReliability::RELIABLE_UNORDERED)
     {
         return 0;
@@ -116,6 +151,9 @@ FalconTransportAdapter::OpenConnection(const AiTransportConnectionConfig& config
                       FalconPushDataHeader::SERIALIZED_SIZE));
     swiftConfig.maxNcwnd = swiftConfig.maxFcwnd;
     swiftConfig.minRetransmissionTimeout = std::min(config.retransmissionTimeout, m_config.baseRtt);
+    swiftConfig.plbTargetDelayMultiplier = m_plbTargetDelayMultiplier;
+    swiftConfig.plbCongestionThreshold = m_plbCongestionThreshold;
+    swiftConfig.plbAttemptThreshold = m_plbAttemptThreshold;
     state.swift = FalconSwift(swiftConfig);
     const double initialPackets =
         std::max(1.0,
@@ -306,7 +344,8 @@ FalconTransportAdapter::Transmit(uint32_t connectionId, uint32_t psn, bool retra
     }
     FalconSimulationTag outgoing = pending->second.tag;
     outgoing.SetPacketTxTimeNs(Simulator::Now().GetNanoSeconds());
-    SendWire(packet, outgoing, connectionId);
+    outgoing.SetPathId(found->second.currentPathId);
+    SendWire(packet, outgoing, connectionId, psn);
     pending->second.timeout.Cancel();
     const Time baseTimeout = std::max(found->second.retransmissionTimeout,
                                       found->second.swift.GetRetransmissionTimeout());
@@ -321,10 +360,11 @@ FalconTransportAdapter::Transmit(uint32_t connectionId, uint32_t psn, bool retra
 bool
 FalconTransportAdapter::SendWire(Ptr<Packet> packet,
                                  const FalconSimulationTag& tag,
-                                 uint32_t connectionId)
+                                 uint32_t connectionId,
+                                 uint32_t sequenceNumber)
 {
     const auto peer = m_peers.find(tag.GetDestinationEndpointId());
-    if (!packet || !m_socket || peer == m_peers.end())
+    if (!packet || m_pathSockets.empty() || peer == m_peers.end())
     {
         return false;
     }
@@ -342,13 +382,14 @@ FalconTransportAdapter::SendWire(Ptr<Packet> packet,
     packet->AddPacketTag(tos);
     const Address destination =
         InetSocketAddress(Ipv4Address::ConvertFrom(peer->second.address), peer->second.port);
-    if (m_socket->SendTo(packet, 0, destination) < 0)
+    const uint32_t pathId = tag.GetPathId() % m_pathSockets.size();
+    if (m_pathSockets[pathId]->SendTo(packet, 0, destination) < 0)
     {
         return false;
     }
     ++m_counters.transmittedDatagrams;
-    NotifyPacketTx(packet, connectionId, 0);
-    NotifyPathSelected(connectionId, 0, 0);
+    NotifyPacketTx(packet, connectionId, pathId);
+    NotifyPathSelected(connectionId, sequenceNumber, pathId);
     return true;
 }
 
@@ -368,7 +409,7 @@ FalconTransportAdapter::Receive(Ptr<Socket> socket)
         }
         const FalconPacketType type = static_cast<FalconPacketType>((prefix[7] >> 1) & 0xf);
         ++m_counters.receivedDatagrams;
-        NotifyPacketRx(packet, tag.GetConnectionId(), 0);
+        NotifyPacketRx(packet, tag.GetConnectionId(), tag.GetPathId());
         if (type == FalconPacketType::PUSH_DATA)
         {
             ReceiveData(packet, tag);
@@ -457,7 +498,8 @@ FalconTransportAdapter::SendEack(const FalconSimulationTag& received,
     response.SetPacketTxTimeNs(received.GetPacketTxTimeNs());
     response.SetPacketRxTimeNs(receiveTimeNs);
     response.SetAckTxTimeNs(Simulator::Now().GetNanoSeconds());
-    SendWire(packet, response, received.GetConnectionId());
+    response.SetPathId(received.GetPathId());
+    SendWire(packet, response, received.GetConnectionId(), 0);
 }
 
 void
@@ -474,7 +516,8 @@ FalconTransportAdapter::SendNack(const FalconSimulationTag& received, uint32_t p
     response.SetDestinationEndpointId(received.GetSourceEndpointId());
     response.SetConnectionId(received.GetConnectionId());
     response.SetMessageId(received.GetMessageId());
-    SendWire(packet, response, received.GetConnectionId());
+    response.SetPathId(received.GetPathId());
+    SendWire(packet, response, received.GetConnectionId(), 0);
 }
 
 void
@@ -502,11 +545,16 @@ FalconTransportAdapter::ReceiveControl(Ptr<Packet> packet,
                 NanoSeconds(tag.GetAckTxTimeNs() - tag.GetPacketRxTimeNs());
             const Time fabricDelay = rtt > remoteResidence ? rtt - remoteResidence : NanoSeconds(0);
             const uint32_t oldWindow = GetSwiftWindowBytes(found->second);
-            found->second.swift.ProcessAck(Simulator::Now(),
-                                           rtt,
-                                           fabricDelay,
-                                           acknowledged.size(),
-                                           0);
+            const bool reroute = found->second.swift.ProcessAck(Simulator::Now(),
+                                                                rtt,
+                                                                fabricDelay,
+                                                                acknowledged.size(),
+                                                                0);
+            if (reroute)
+            {
+                RandomizePath(found->second);
+                ++m_counters.pathReroutes;
+            }
             NotifySwiftWindowChange(tag.GetConnectionId(), oldWindow);
         }
         RetireAcknowledged(tag.GetConnectionId(), acknowledged);
@@ -630,6 +678,17 @@ FalconTransportAdapter::NotifySwiftWindowChange(uint32_t connectionId, uint32_t 
 }
 
 void
+FalconTransportAdapter::RandomizePath(ConnectionState& state)
+{
+    if (m_pathCount <= 1 || !m_pathRandom)
+    {
+        return;
+    }
+    const uint32_t alternative = m_pathRandom->GetInteger(0, m_pathCount - 2);
+    state.currentPathId = alternative >= state.currentPathId ? alternative + 1 : alternative;
+}
+
+void
 FalconTransportAdapter::DoDispose()
 {
     for (auto& [unusedConnection, state] : m_connections)
@@ -641,11 +700,20 @@ FalconTransportAdapter::DoDispose()
             pending.timeout.Cancel();
         }
     }
-    if (m_socket)
+    if (m_receiveSocket)
     {
-        m_socket->Close();
-        m_socket = nullptr;
+        m_receiveSocket->Close();
+        m_receiveSocket = nullptr;
     }
+    for (auto& socket : m_pathSockets)
+    {
+        if (socket)
+        {
+            socket->Close();
+        }
+    }
+    m_pathSockets.clear();
+    m_pathRandom = nullptr;
     m_node = nullptr;
     AiTransportEndpoint::DoDispose();
 }

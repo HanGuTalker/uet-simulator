@@ -27,6 +27,9 @@ FalconSwift::Initialize(double fcwnd, double ncwnd, Time initialRtt)
     m_nicWindowMarker = Seconds(0);
     m_nicDirection = NicDirection::INCREASE;
     m_retransmitCount = 0;
+    m_plbPacketsAcknowledged = 0;
+    m_plbCongestedPacketsAcknowledged = 0;
+    m_plbRerouteAttempts = 0;
     UpdateDerivedValues();
 }
 
@@ -101,7 +104,7 @@ FalconSwift::UpdateNicWindow(Time now, uint8_t rxBufferLevel, bool forceDecrease
     }
 }
 
-void
+bool
 FalconSwift::ProcessAck(Time now,
                         Time rtt,
                         Time fabricDelay,
@@ -115,10 +118,47 @@ FalconSwift::ProcessAck(Time now,
     m_smoothedDelay =
         NanoSeconds(static_cast<int64_t>(delayAlpha * m_smoothedDelay.GetNanoSeconds() +
                                          (1.0 - delayAlpha) * fabricDelay.GetNanoSeconds()));
+    const double oldWindow = GetEffectiveWindow();
+    const bool reroute = ComputePlb(oldWindow, packetsAcknowledged);
     UpdateFabricWindow(now, packetsAcknowledged);
     UpdateNicWindow(now, rxBufferLevel, false);
     m_retransmitCount = 0;
     UpdateDerivedValues();
+    return reroute;
+}
+
+bool
+FalconSwift::ComputePlb(double oldWindow, uint32_t packetsAcknowledged)
+{
+    m_plbPacketsAcknowledged += packetsAcknowledged;
+    const double thresholdNs =
+        m_config.baseDelayTarget.GetNanoSeconds() * m_config.plbTargetDelayMultiplier;
+    if (m_smoothedDelay.GetNanoSeconds() > thresholdNs)
+    {
+        m_plbCongestedPacketsAcknowledged += packetsAcknowledged;
+    }
+    if (packetsAcknowledged == 0 || m_plbPacketsAcknowledged < oldWindow)
+    {
+        return false;
+    }
+    const double congestedFraction =
+        static_cast<double>(m_plbCongestedPacketsAcknowledged) / m_plbPacketsAcknowledged;
+    if (congestedFraction < m_config.plbCongestionThreshold)
+    {
+        m_plbRerouteAttempts = 0;
+    }
+    else
+    {
+        ++m_plbRerouteAttempts;
+    }
+    const bool reroute = m_plbRerouteAttempts >= m_config.plbAttemptThreshold;
+    if (reroute)
+    {
+        m_plbRerouteAttempts = 0;
+    }
+    m_plbPacketsAcknowledged = 0;
+    m_plbCongestedPacketsAcknowledged = 0;
+    return reroute;
 }
 
 void

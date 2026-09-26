@@ -29,7 +29,7 @@ FalconSimulationTag::GetInstanceTypeId() const
 uint32_t
 FalconSimulationTag::GetSerializedSize() const
 {
-    return 72;
+    return 76;
 }
 
 void
@@ -47,6 +47,7 @@ FalconSimulationTag::Serialize(TagBuffer b) const
     b.WriteU64(m_packetTxTimeNs);
     b.WriteU64(m_packetRxTimeNs);
     b.WriteU64(m_ackTxTimeNs);
+    b.WriteU32(m_pathId);
 }
 
 void
@@ -64,6 +65,7 @@ FalconSimulationTag::Deserialize(TagBuffer b)
     m_packetTxTimeNs = b.ReadU64();
     m_packetRxTimeNs = b.ReadU64();
     m_ackTxTimeNs = b.ReadU64();
+    m_pathId = b.ReadU32();
 }
 
 void
@@ -71,7 +73,7 @@ FalconSimulationTag::Print(std::ostream& os) const
 {
     os << "src=" << m_sourceEndpointId << " dst=" << m_destinationEndpointId
        << " cid=" << m_connectionId << " message=" << m_messageId << " payload=" << m_payloadBytes
-       << " fragment=" << m_fragment << "/" << m_fragmentCount;
+       << " fragment=" << m_fragment << "/" << m_fragmentCount << " path=" << m_pathId;
 }
 
 #define FALCON_TAG_ACCESSOR(Name, Type, Member)                                                    \
@@ -96,6 +98,7 @@ FALCON_TAG_ACCESSOR(FragmentCount, uint32_t, m_fragmentCount)
 FALCON_TAG_ACCESSOR(PacketTxTimeNs, uint64_t, m_packetTxTimeNs)
 FALCON_TAG_ACCESSOR(PacketRxTimeNs, uint64_t, m_packetRxTimeNs)
 FALCON_TAG_ACCESSOR(AckTxTimeNs, uint64_t, m_ackTxTimeNs)
+FALCON_TAG_ACCESSOR(PathId, uint32_t, m_pathId)
 
 #undef FALCON_TAG_ACCESSOR
 

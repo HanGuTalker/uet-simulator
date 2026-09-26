@@ -113,6 +113,7 @@ struct AiTransportCounters
     uint64_t fastRetransmissions{0};
     uint64_t rttProbes{0};
     uint64_t slowPathSignals{0};
+    uint64_t pathReroutes{0};
 };
 
 std::string ToString(AiTransportProtocol protocol);

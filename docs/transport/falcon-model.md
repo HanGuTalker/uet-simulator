@@ -71,13 +71,31 @@ specified 131.072 ns unit.
 This is a comparison-oriented Swift/RUE subset rather than a Falcon conformance claim. The OCP
 specification deliberately leaves algorithm parameters programmable, so the simulator provides
 explicit defaults through `FalconSwiftConfig`. Hardware RUE request/response queues, CSIG parsing,
-PLB path migration, Resync, complete Pull transactions, PSP/ESP processing and resource-manager
-limits remain deferred.
+Resync, complete Pull transactions, PSP/ESP processing and resource-manager limits remain
+deferred.
+
+## Phase P5: protective load balancing
+
+The Swift ACK path implements the section 10.4 PLB pseudocode. It classifies ACKed packets as
+congested when smoothed fabric delay exceeds a configurable multiple of the delay target,
+accumulates a sample until at least the pre-update effective window has been acknowledged, and
+counts consecutive RTT samples whose congested fraction crosses the configured threshold. Once
+the attempt threshold is reached, the connection changes its IPv4 UDP source-port entropy path.
+
+Each endpoint owns a configurable bank of source sockets. The simulation-only tag records the
+selected path so ACK/NACK responses and common traces retain path identity; the Falcon wire image
+is unchanged. A reroute always selects a path different from the current path. Workload runs emit
+all selections in `-paths.csv` and report selection and active-path counts in schema-version-5
+summary output.
+
+The current switched and single-spine benchmark fabrics do not provide physically distinct ECMP
+routes, so a path change there validates Falcon endpoint behavior and UDP entropy but not fabric
+rerouting benefit. A multi-spine ECMP topology is required before claiming PLB performance gains.
 
 ## Verification
 
 Wire headers and reliability behavior retain their byte-level and state-machine tests. The Swift
 suite deterministically covers additive increase, delay-based multiplicative decrease, the RTT
-guard, retransmission collapse and sub-packet-window pacing. An adapter-level two-node test drops
-the first data frame deliberately and verifies timeout retransmission and eventual message
-completion.
+guard, retransmission collapse, sub-packet-window pacing and PLB's consecutive-congested-RTT
+threshold. An adapter-level two-node test drops the first data frame deliberately and verifies
+timeout retransmission, eventual message completion and a subsequent UDP entropy-path change.
