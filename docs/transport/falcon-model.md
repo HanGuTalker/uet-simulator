@@ -36,7 +36,21 @@ advances cumulative data/request window bases, generates BACK/EACK state and con
 and NACK feedback. Data-received and ULP-acknowledged states remain distinct: an EACK receive bit
 suppresses ambiguity without retiring the sender's packet until the ACK bitmap confirms it.
 
-The current state machine intentionally stops below the socket layer. Timer policy, packet
-scheduling, transaction segmentation and connection lookup will be supplied by the Falcon common
-transport adapter in P3. PSN wraparound is also deferred; the implementation asserts before local
-allocation wraps so experiments cannot silently compare ambiguous sequence numbers.
+PSN wraparound is deferred; the implementation asserts before local allocation wraps so
+experiments cannot silently compare ambiguous sequence numbers.
+
+## Phase P3: common transport adapter
+
+`FalconTransportAdapter` registers Falcon with the common AI workload framework. MESSAGE, SEND and
+WRITE requests using reliable-unordered delivery are fragmented into Push Data packets, paced at
+the configured connection rate and admitted under the configured byte window. Receivers perform
+out-of-order placement, return EACK state, issue NACK for packets outside the represented receive
+window and complete a message only after all simulation fragments arrive. Senders release window
+bytes from cumulative or selective ACKs and use exponential-backoff timeouts plus NACK-triggered
+fast retransmission.
+
+`FalconSimulationTag` carries experiment-only source, message and fragmentation context without
+adding bytes to the Falcon wire image. The adapter currently models Falcon over an ns-3 UDP
+substrate, as do the other comparison adapters; UDP/IP overhead is still included by the network
+stack. Swift/RUE congestion control, PLB, Resync, Pull transactions and PSP/ESP overhead remain
+deferred and are not claimed by this comparison subset.

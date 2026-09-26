@@ -6,6 +6,7 @@
 #include "ns3/ai-transport-module.h"
 #include "ns3/core-module.h"
 #include "ns3/csma-module.h"
+#include "ns3/falcon-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/mrc-module.h"
 #include "ns3/network-module.h"
@@ -295,6 +296,8 @@ class AiWorkload
         transportFactory.Register(AiTransportProtocol::ROCEV2, RoceV2TransportAdapter::GetTypeId());
         transportFactory.Register(AiTransportProtocol::VEROCE, VeRoceTransportAdapter::GetTypeId());
         transportFactory.Register(AiTransportProtocol::MRC, MrcTransportAdapter::GetTypeId());
+        transportFactory.Register(AiTransportProtocol::FALCON,
+                                  FalconTransportAdapter::GetTypeId());
         if (protocol == AiTransportProtocol::UNKNOWN || !transportFactory.IsRegistered(protocol))
         {
             std::cerr << "Transport '" << transportName

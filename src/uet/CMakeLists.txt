@@ -34,6 +34,7 @@ build_lib(
     ${libinternet}
     ${libpoint-to-point}
     ${libcsma}
+    ${libfalcon}
   TEST_SOURCES
     test/uet-test-suite.cc
 )

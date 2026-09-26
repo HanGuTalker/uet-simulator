@@ -4,13 +4,19 @@ build_lib(
     model/falcon-control-header.cc
     model/falcon-header.cc
     model/falcon-reliability.cc
+    model/falcon-simulation-tag.cc
+    model/falcon-transport-adapter.cc
   HEADER_FILES
     model/falcon-control-header.h
     model/falcon-header.h
     model/falcon-reliability.h
+    model/falcon-simulation-tag.h
+    model/falcon-transport-adapter.h
   LIBRARIES_TO_LINK
+    ${libai-transport}
     ${libcore}
     ${libnetwork}
+    ${libinternet}
   TEST_SOURCES
     test/falcon-header-test-suite.cc
     test/falcon-reliability-test-suite.cc
