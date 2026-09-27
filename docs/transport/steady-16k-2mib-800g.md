@@ -37,3 +37,22 @@ physical rate, with only 2 MiB of total traffic. The remaining gap includes init
 latency and wire-format overhead. A substantially longer transfer should move the aggregate result
 closer to the large-message asymptote, but is not necessary to demonstrate that the 75 Gbps result
 was a short-message measurement effect rather than a link-rate limitation.
+
+## 64 MiB scaling check
+
+Setting `TOTAL_BYTES=67108864` sends 4,096 consecutive 16 KiB messages per protocol:
+
+| Protocol | Completed | Goodput | Physical-rate fraction | Mean latency | P99 latency |
+|---|---:|---:|---:|---:|---:|
+| UEC | 4096/4096 | 778.408 Gbps | 97.30% | 9.934 us | 17.964 us |
+| RoCEv2 | 4096/4096 | 778.412 Gbps | 97.30% | 9.930 us | 17.960 us |
+| veRoCE | 4096/4096 | 778.252 Gbps | 97.28% | 10.003 us | 18.100 us |
+| MRC | 4096/4096 | 778.408 Gbps | 97.30% | 9.934 us | 17.964 us |
+| Falcon | 4096/4096 | 778.408 Gbps | 97.30% | 9.934 us | 17.964 us |
+
+All 20,480 messages completed without retransmission, timeout, NACK, ECN marking or packet loss.
+The longer transfer amortizes almost all fixed pipeline latency and approaches the approximately
+782.8 Gbps UEC payload-rate ceiling imposed by 4 KiB segmentation and wire headers. The submission
+rate represents 800 Gbps of payload before headers, so it slightly exceeds the sustainable payload
+rate; this creates bounded serialization backlog and explains the higher per-message mean and P99
+latency without indicating congestion loss.
