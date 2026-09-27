@@ -21,13 +21,13 @@ fi
   --pattern=incast \
   --fabric=switched \
   --linkRate=800Gbps \
-  --linkDelayNs=1000 \
+  --hostLinkDelayNs=100 --fabricLinkDelayNs=250 --switchProcessingDelayNs=250 \
   --queuePackets=10000 \
   --reusePdc=1 \
   --warmupBytes=67108864 \
   --measurementStartUs=5000 \
   --startGapNs=0 \
-  --nsccBaseRttNs=4200 \
+  --nsccBaseRttNs=0 \
   --nsccTargetQueueDelayNs=12000 \
   --outputPrefix="$output_dir/steady"
 

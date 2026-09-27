@@ -1,5 +1,11 @@
 # Unified 800 Gbps uncongested baseline
 
+> **Superseded timing profile.** The measurements below are retained as a historical artifact of
+> the original 1 us-per-link model and 64 KiB initial-window experiment. They must not be used as
+> the corrected low-latency baseline. The runner now uses 100 ns host links, 250 ns fabric links,
+> 250 ns switch processing and a topology-derived base RTT; its replacement results have not yet
+> been recorded in this document.
+
 ## Method
 
 This baseline uses the common workload entry point for UEC, RoCEv2, veRoCE, MRC and Falcon. Each
@@ -12,13 +18,14 @@ completed successfully. All runs recorded zero retransmissions, timeouts, NACKs,
 marks, queue drops and device drops. This confirms that the measurements are an unloaded transport
 baseline rather than a congestion-control stress test.
 
-Reproduce the experiment with:
+Run the corrected replacement experiment with:
 
 ```bash
 bash scripts/transport/run_uncongested_baseline_800g.sh
 ```
 
-The compact output is `results/uncongested-baseline-800g/baseline-summary.csv`; protocol-native
+The compact replacement output is `results/uncongested-baseline-800g/baseline-summary.csv`;
+protocol-native
 structured outputs remain below the corresponding payload-size directories.
 
 ## Goodput

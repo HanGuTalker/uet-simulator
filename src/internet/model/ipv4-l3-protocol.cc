@@ -52,6 +52,11 @@ Ipv4L3Protocol::GetTypeId()
                           UintegerValue(64),
                           MakeUintegerAccessor(&Ipv4L3Protocol::m_defaultTtl),
                           MakeUintegerChecker<uint8_t>())
+            .AddAttribute("ForwardingDelay",
+                          "Processing delay before forwarding a unicast IPv4 packet.",
+                          TimeValue(NanoSeconds(0)),
+                          MakeTimeAccessor(&Ipv4L3Protocol::m_forwardingDelay),
+                          MakeTimeChecker())
             .AddAttribute("FragmentExpirationTimeout",
                           "When this timeout expires, the fragments "
                           "will be cleared from the buffer.",
@@ -1048,7 +1053,16 @@ Ipv4L3Protocol::IpForward(Ptr<Ipv4Route> rtentry, Ptr<const Packet> p, const Ipv
     }
 
     m_unicastForwardTrace(ipHeader, packet, interface);
-    SendRealOut(rtentry, packet, ipHeader);
+    if (m_forwardingDelay.IsZero())
+    {
+        SendRealOut(rtentry, packet, ipHeader);
+    }
+    else
+    {
+        Simulator::Schedule(m_forwardingDelay, [this, rtentry, packet, ipHeader]() {
+            SendRealOut(rtentry, packet, ipHeader);
+        });
+    }
 }
 
 void

@@ -36,7 +36,10 @@ for bytes in $sizes; do
       --payloadBytes="$bytes" \
       --fabric=leaf-spine \
       --linkRate=800Gbps \
-      --linkDelayNs=1000 \
+      --hostLinkDelayNs=100 \
+      --fabricLinkDelayNs=250 \
+      --switchProcessingDelayNs=250 \
+      --nsccBaseRttNs=0 \
       --nsccInitialWindowBytes="$initial_window_bytes" \
       --enableEcn=0 \
       --enableTrimming=0 \

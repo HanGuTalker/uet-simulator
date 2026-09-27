@@ -8,9 +8,10 @@ output_dir=${1:-results/leaf-spine-validation-800g}
 binary=${UET_BENCH_BINARY:-build-perf/src/uet/examples/ns3.47-uet-ai-workload-example-optimized}
 
 common=(
-  --nodes=8 --fabric=leaf-spine --linkRate=800Gbps --linkDelayNs=1000
+  --nodes=8 --fabric=leaf-spine --linkRate=800Gbps
+  --hostLinkDelayNs=100 --fabricLinkDelayNs=250 --switchProcessingDelayNs=250
   --queuePackets=10000 --reusePdc=1 --warmupBytes=1048576
-  --measurementStartUs=1500 --startGapNs=0 --nsccBaseRttNs=6200
+  --measurementStartUs=1500 --startGapNs=0 --nsccBaseRttNs=0
   --nsccTargetQueueDelayNs=800 --enableEcn=1 --ecnMinBytes=98304
   --ecnMaxBytes=163840 --ecnQueueLimitBytes=524288
 )

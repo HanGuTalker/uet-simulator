@@ -26,13 +26,13 @@ run_case() {
     --pattern="$pattern" \
     --fabric=switched \
     --linkRate=800Gbps \
-    --linkDelayNs=1000 \
+    --hostLinkDelayNs=100 --fabricLinkDelayNs=250 --switchProcessingDelayNs=250 \
     --queuePackets=10000 \
     --reusePdc=1 \
     --warmupBytes=1048576 \
     --measurementStartUs=1000 \
     --startGapNs=0 \
-    --nsccBaseRttNs=4200 \
+    --nsccBaseRttNs=0 \
     --nsccTargetQueueDelayNs=800 \
     --enableEcn=1 \
     --ecnMinBytes=65536 \

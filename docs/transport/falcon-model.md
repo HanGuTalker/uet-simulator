@@ -85,7 +85,7 @@ the attempt threshold is reached, the connection changes its IPv4 UDP source-por
 Each endpoint owns a configurable bank of source sockets. The simulation-only tag records the
 selected path so ACK/NACK responses and common traces retain path identity; the Falcon wire image
 is unchanged. A reroute always selects a path different from the current path. Workload runs emit
-all selections in `-paths.csv` and report selection and active-path counts in schema-version-6
+all selections in `-paths.csv` and report selection and active-path counts in schema-version-7
 summary output.
 
 The workload runner now provides physically distinct, five-tuple-hashed ECMP routes through its

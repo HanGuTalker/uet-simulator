@@ -47,7 +47,10 @@ class AiWorkload
              uint32_t spineCount,
              const std::string& linkRate,
              uint64_t linkRateBps,
-             uint32_t linkDelayNs,
+             uint32_t legacyLinkDelayNs,
+             uint32_t hostLinkDelayNs,
+             uint32_t fabricLinkDelayNs,
+             uint32_t switchProcessingDelayNs,
              uint32_t queuePackets,
              bool reusePdc,
              uint32_t warmupBytes,
@@ -86,13 +89,24 @@ class AiWorkload
         m_spineCount = (fabricType == "leaf-spine") ? spineCount : 0;
         m_linkRate = linkRate;
         m_linkRateBps = linkRateBps;
-        m_linkDelayNs = linkDelayNs;
+        m_legacyLinkDelayNs = legacyLinkDelayNs;
+        m_hostLinkDelayNs = legacyLinkDelayNs == 0 ? hostLinkDelayNs : legacyLinkDelayNs;
+        m_fabricLinkDelayNs = legacyLinkDelayNs == 0 ? fabricLinkDelayNs : legacyLinkDelayNs;
+        m_switchProcessingDelayNs = switchProcessingDelayNs;
+        m_topologyBaseRttNs =
+            fabricType == "leaf-spine" ? 4ULL * m_hostLinkDelayNs + 4ULL * m_fabricLinkDelayNs +
+                                             6ULL * m_switchProcessingDelayNs + 200ULL
+            : fabricType == "switched"
+                ? 4ULL * m_hostLinkDelayNs + 2ULL * m_switchProcessingDelayNs + 200ULL
+                : 2ULL * m_hostLinkDelayNs + 200ULL;
         m_queuePackets = (enableEcn || enableTrimming) ? 1 : queuePackets;
         m_reusePdc = reusePdc;
         m_warmupBytes = warmupBytes;
         m_measurementStartUs = measurementStartUs;
         m_startGapNs = startGapNs;
-        m_nsccBaseRttNs = nsccBaseRttNs;
+        m_nsccRequestedBaseRttNs = nsccBaseRttNs;
+        m_nsccBaseRttNs =
+            nsccBaseRttNs == 0 ? static_cast<uint32_t>(m_topologyBaseRttNs) : nsccBaseRttNs;
         m_nsccTargetQueueDelayNs = nsccTargetQueueDelayNs;
         m_nsccRequestedInitialWindowBytes = nsccInitialWindowBytes;
         m_autoScaleInitialWindow = autoScaleInitialWindow;
@@ -141,6 +155,8 @@ class AiWorkload
             Config::SetDefault("ns3::Ipv4GlobalRouting::FlowEcmpRouting", BooleanValue(true));
             Config::SetDefault("ns3::Ipv4GlobalRouting::RandomEcmpRouting", BooleanValue(false));
         }
+        Config::SetDefault("ns3::Ipv4L3Protocol::ForwardingDelay",
+                           TimeValue(NanoSeconds(m_switchProcessingDelayNs)));
         NodeContainer nodes;
         nodes.Create(nodeCount);
         InternetStackHelper internet;
@@ -157,7 +173,7 @@ class AiWorkload
             PointToPointHelper link;
             link.SetDeviceAttribute("DataRate", StringValue(linkRate));
             link.SetDeviceAttribute("Mtu", UintegerValue(9000));
-            link.SetChannelAttribute("Delay", TimeValue(NanoSeconds(linkDelayNs)));
+            link.SetChannelAttribute("Delay", TimeValue(NanoSeconds(m_hostLinkDelayNs)));
             link.SetQueue(
                 "ns3::DropTailQueue",
                 "MaxSize",
@@ -185,7 +201,7 @@ class AiWorkload
             PointToPointHelper link;
             link.SetDeviceAttribute("DataRate", StringValue(linkRate));
             link.SetDeviceAttribute("Mtu", UintegerValue(9000));
-            link.SetChannelAttribute("Delay", TimeValue(NanoSeconds(linkDelayNs)));
+            link.SetChannelAttribute("Delay", TimeValue(NanoSeconds(m_hostLinkDelayNs)));
             link.SetQueue(
                 "ns3::DropTailQueue",
                 "MaxSize",
@@ -207,6 +223,7 @@ class AiWorkload
             }
             for (uint32_t leaf = 0; leaf < 2; ++leaf)
             {
+                link.SetChannelAttribute("Delay", TimeValue(NanoSeconds(m_fabricLinkDelayNs)));
                 for (uint32_t spine = 0; spine < spineCount; ++spine)
                 {
                     auto devices = link.Install(
@@ -229,7 +246,7 @@ class AiWorkload
         {
             CsmaHelper fabric;
             fabric.SetChannelAttribute("DataRate", StringValue(linkRate));
-            fabric.SetChannelAttribute("Delay", TimeValue(NanoSeconds(linkDelayNs)));
+            fabric.SetChannelAttribute("Delay", TimeValue(NanoSeconds(m_hostLinkDelayNs)));
             fabric.SetDeviceAttribute("Mtu", UintegerValue(9000));
             fabric.SetQueue("ns3::DropTailQueue",
                             "MaxSize",
@@ -271,7 +288,8 @@ class AiWorkload
                     "LinkBandwidth",
                     StringValue(linkRate),
                     "LinkDelay",
-                    TimeValue(NanoSeconds(linkDelayNs)),
+                    TimeValue(NanoSeconds(fabricType == "leaf-spine" ? m_fabricLinkDelayNs
+                                                                     : m_hostLinkDelayNs)),
                     "MinTh",
                     DoubleValue(ecnMinBytes),
                     "MaxTh",
@@ -327,8 +345,7 @@ class AiWorkload
         m_endpoints.resize(nodeCount);
         for (uint32_t i = 0; i < nodeCount; ++i)
         {
-            const uint64_t baseRttNs = 4ULL * linkDelayNs + 200ULL;
-            const uint64_t bdpBytes = (linkRateBps * baseRttNs) / 8000000000ULL;
+            const uint64_t bdpBytes = (linkRateBps * m_topologyBaseRttNs) / 8000000000ULL;
             AiTransportEndpointConfig endpointConfig;
             endpointConfig.endpointId = i + 1;
             endpointConfig.payloadMtuBytes = 4096;
@@ -338,8 +355,8 @@ class AiWorkload
             endpointConfig.maximumWindowBytes = static_cast<uint32_t>(
                 std::min<uint64_t>(std::numeric_limits<uint32_t>::max(),
                                    std::max<uint64_t>(65536, (3 * bdpBytes) / 2)));
-            endpointConfig.baseRtt = NanoSeconds(nsccBaseRttNs);
-            endpointConfig.targetQueueDelay = NanoSeconds(nsccTargetQueueDelayNs);
+            endpointConfig.baseRtt = NanoSeconds(m_nsccBaseRttNs);
+            endpointConfig.targetQueueDelay = NanoSeconds(m_nsccTargetQueueDelayNs);
             endpointConfig.workConservingScheduler = enableWorkConservingScheduler;
             m_endpoints[i] = transportFactory.Create(protocol);
             if (!m_endpoints[i] || !m_endpoints[i]->Initialize(nodes.Get(i), endpointConfig))
@@ -1169,14 +1186,16 @@ class AiWorkload
         }
 
         const std::string header =
-            "protocol,operation,pattern,fabric,spine_count,link_rate,link_rate_bps,link_delay_ns,"
-            "queue_packets,"
+            "protocol,operation,pattern,fabric,spine_count,link_rate,link_rate_bps,"
+            "legacy_link_delay_ns,host_link_delay_ns,fabric_link_delay_ns,"
+            "switch_processing_delay_ns,topology_base_rtt_ns,queue_packets,"
             "node_"
             "count,"
             "messages_per_pair,payload_bytes,reuse_pdc,warmup_bytes,warmups_attempted,"
             "warmups_submitted,warmups_completed,measurement_start_us,start_gap_ns,background_"
             "start_offset_ns,"
-            "nscc_base_rtt_ns,nscc_target_queue_delay_ns,nscc_initial_window_bytes,"
+            "nscc_base_rtt_ns,nscc_requested_base_rtt_ns,nscc_target_queue_delay_ns,"
+            "nscc_initial_window_bytes,"
             "nscc_requested_initial_window_bytes,auto_scale_initial_window,measurement_start_cwnd_"
             "bytes,"
             "ecn_enabled,trimming_enabled,ecn_min_bytes,ecn_max_bytes,ecn_queue_limit_bytes,peak_"
@@ -1192,12 +1211,14 @@ class AiWorkload
             "fabric_path_packets,device_queue_drops\n";
         summaries << header << m_transportName << ',' << m_operationName << ',' << m_pattern << ','
                   << m_fabricType << ',' << m_spineCount << ',' << m_linkRate << ','
-                  << m_linkRateBps << ',' << m_linkDelayNs << ',' << m_queuePackets << ','
-                  << m_nodeCount << ',' << m_messagesPerPair << ',' << m_payloadBytes << ','
-                  << (m_reusePdc ? 1 : 0) << ',' << m_warmupBytes << ',' << m_warmupsAttempted
-                  << ',' << m_warmupsSubmitted << ',' << m_warmupsCompleted << ','
-                  << m_measurementStartUs << ',' << m_startGapNs << ',' << m_backgroundStartOffsetNs
-                  << ',' << m_nsccBaseRttNs << ',' << m_nsccTargetQueueDelayNs << ','
+                  << m_linkRateBps << ',' << m_legacyLinkDelayNs << ',' << m_hostLinkDelayNs << ','
+                  << m_fabricLinkDelayNs << ',' << m_switchProcessingDelayNs << ','
+                  << m_topologyBaseRttNs << ',' << m_queuePackets << ',' << m_nodeCount << ','
+                  << m_messagesPerPair << ',' << m_payloadBytes << ',' << (m_reusePdc ? 1 : 0)
+                  << ',' << m_warmupBytes << ',' << m_warmupsAttempted << ',' << m_warmupsSubmitted
+                  << ',' << m_warmupsCompleted << ',' << m_measurementStartUs << ',' << m_startGapNs
+                  << ',' << m_backgroundStartOffsetNs << ',' << m_nsccBaseRttNs << ','
+                  << m_nsccRequestedBaseRttNs << ',' << m_nsccTargetQueueDelayNs << ','
                   << m_nsccInitialWindowBytes << ',' << m_nsccRequestedInitialWindowBytes << ','
                   << (m_autoScaleInitialWindow ? 1 : 0) << ',' << MeanMeasurementStartCwnd() << ','
                   << (m_enableEcn ? 1 : 0) << ',' << (m_enableTrimming ? 1 : 0) << ','
@@ -1220,7 +1241,7 @@ class AiWorkload
                   << m_fabricPathSamples.size() << ',' << m_deviceQueueDrops << '\n';
 
         json << std::fixed << std::setprecision(3) << "{\n"
-             << "  \"schema_version\": 6,\n"
+             << "  \"schema_version\": 7,\n"
              << "  \"protocol\": \"" << m_transportName << "\",\n"
              << "  \"operation\": \"" << m_operationName << "\",\n"
              << "  \"pattern\": \"" << m_pattern << "\",\n"
@@ -1228,7 +1249,11 @@ class AiWorkload
              << "  \"spine_count\": " << m_spineCount << ",\n"
              << "  \"link_rate\": \"" << m_linkRate << "\",\n"
              << "  \"link_rate_bps\": " << m_linkRateBps << ",\n"
-             << "  \"link_delay_ns\": " << m_linkDelayNs << ",\n"
+             << "  \"delay_model_ns\": {\"legacy_link\": " << m_legacyLinkDelayNs
+             << ", \"host_link\": " << m_hostLinkDelayNs
+             << ", \"fabric_link\": " << m_fabricLinkDelayNs
+             << ", \"switch_processing\": " << m_switchProcessingDelayNs
+             << ", \"topology_base_rtt\": " << m_topologyBaseRttNs << "},\n"
              << "  \"queue_packets\": " << m_queuePackets << ",\n"
              << "  \"node_count\": " << m_nodeCount << ",\n"
              << "  \"messages_per_pair\": " << m_messagesPerPair << ",\n"
@@ -1258,6 +1283,7 @@ class AiWorkload
              << ", \"start_gap_ns\": " << m_startGapNs
              << ", \"measurement_start_cwnd_bytes\": " << MeanMeasurementStartCwnd() << "},\n"
              << "  \"nscc\": {\"base_rtt_ns\": " << m_nsccBaseRttNs
+             << ", \"requested_base_rtt_ns\": " << m_nsccRequestedBaseRttNs
              << ", \"target_queue_delay_ns\": " << m_nsccTargetQueueDelayNs
              << ", \"initial_window_bytes\": " << m_nsccInitialWindowBytes
              << ", \"requested_initial_window_bytes\": " << m_nsccRequestedInitialWindowBytes
@@ -1338,13 +1364,18 @@ class AiWorkload
     uint32_t m_spineCount{1};
     std::string m_linkRate;
     uint64_t m_linkRateBps{0};
-    uint32_t m_linkDelayNs{0};
+    uint32_t m_legacyLinkDelayNs{0};
+    uint32_t m_hostLinkDelayNs{0};
+    uint32_t m_fabricLinkDelayNs{0};
+    uint32_t m_switchProcessingDelayNs{0};
+    uint64_t m_topologyBaseRttNs{0};
     uint32_t m_queuePackets{0};
     bool m_reusePdc{false};
     uint32_t m_warmupBytes{0};
     uint32_t m_measurementStartUs{0};
     uint64_t m_startGapNs{10000};
-    uint32_t m_nsccBaseRttNs{12000};
+    uint32_t m_nsccBaseRttNs{0};
+    uint32_t m_nsccRequestedBaseRttNs{0};
     uint32_t m_nsccTargetQueueDelayNs{12000};
     uint32_t m_nsccInitialWindowBytes{65536};
     uint32_t m_nsccRequestedInitialWindowBytes{65536};
@@ -1438,13 +1469,16 @@ main(int argc, char* argv[])
     std::string fabric = "switched";
     uint32_t spines = 2;
     std::string linkRate = "400Gbps";
-    uint32_t linkDelayNs = 1000;
+    uint32_t linkDelayNs = 0;
+    uint32_t hostLinkDelayNs = 100;
+    uint32_t fabricLinkDelayNs = 250;
+    uint32_t switchProcessingDelayNs = 250;
     uint32_t queuePackets = 10000;
     bool reusePdc = false;
     uint32_t warmupBytes = 0;
     uint32_t measurementStartUs = 0;
     uint64_t startGapNs = 10000;
-    uint32_t nsccBaseRttNs = 12000;
+    uint32_t nsccBaseRttNs = 0;
     uint32_t nsccTargetQueueDelayNs = 12000;
     uint32_t nsccInitialWindowBytes = 65536;
     bool autoScaleInitialWindow = false;
@@ -1475,13 +1509,26 @@ main(int argc, char* argv[])
     command.AddValue("fabric", "switched star, two-leaf leaf-spine, or shared csma", fabric);
     command.AddValue("spines", "Number of ECMP spines in a leaf-spine fabric", spines);
     command.AddValue("linkRate", "Endpoint and fabric link data rate", linkRate);
-    command.AddValue("linkDelayNs", "One-way propagation delay per link in ns", linkDelayNs);
+    command.AddValue("linkDelayNs",
+                     "Legacy one-way delay override for every link; zero uses split delays",
+                     linkDelayNs);
+    command.AddValue("hostLinkDelayNs",
+                     "One-way endpoint-to-leaf propagation delay in ns",
+                     hostLinkDelayNs);
+    command.AddValue("fabricLinkDelayNs",
+                     "One-way leaf-to-spine propagation delay in ns",
+                     fabricLinkDelayNs);
+    command.AddValue("switchProcessingDelayNs",
+                     "Per-router packet forwarding delay in ns",
+                     switchProcessingDelayNs);
     command.AddValue("queuePackets", "DropTail capacity per device in packets", queuePackets);
     command.AddValue("reusePdc", "Reuse one RUD PDC per communicating pair", reusePdc);
     command.AddValue("warmupBytes", "Unmeasured warm-up message bytes per reused PDC", warmupBytes);
     command.AddValue("measurementStartUs", "Measured traffic start time in us", measurementStartUs);
     command.AddValue("startGapNs", "Gap between measured message submissions in ns", startGapNs);
-    command.AddValue("nsccBaseRttNs", "NSCC base RTT estimate in ns", nsccBaseRttNs);
+    command.AddValue("nsccBaseRttNs",
+                     "NSCC base RTT estimate in ns; zero derives it from the topology",
+                     nsccBaseRttNs);
     command.AddValue("nsccTargetQueueDelayNs",
                      "NSCC target queue delay in ns",
                      nsccTargetQueueDelayNs);
@@ -1542,8 +1589,9 @@ main(int argc, char* argv[])
         (enableWorkConservingScheduler && ringJobWeight == 0) ||
         (fabric != "switched" && fabric != "leaf-spine" && fabric != "csma") ||
         (fabric == "leaf-spine" && (nodes < 4 || nodes % 2 != 0)) || spines == 0 || spines > 16 ||
-        linkDelayNs == 0 || queuePackets == 0 || nsccBaseRttNs < 128 ||
-        nsccTargetQueueDelayNs < 128 || nsccInitialWindowBytes == 0 ||
+        hostLinkDelayNs == 0 || fabricLinkDelayNs == 0 || queuePackets == 0 ||
+        (nsccBaseRttNs != 0 && nsccBaseRttNs < 128) || nsccTargetQueueDelayNs < 128 ||
+        nsccInitialWindowBytes == 0 ||
         ((enableEcn || enableTrimming) &&
          (fabric == "csma" || ecnMinBytes == 0 || ecnMinBytes >= ecnMaxBytes ||
           ecnMaxBytes >= ecnQueueLimitBytes)) ||
@@ -1567,6 +1615,9 @@ main(int argc, char* argv[])
                         linkRate,
                         linkRateBps,
                         linkDelayNs,
+                        hostLinkDelayNs,
+                        fabricLinkDelayNs,
+                        switchProcessingDelayNs,
                         queuePackets,
                         reusePdc,
                         warmupBytes,

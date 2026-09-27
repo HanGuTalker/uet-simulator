@@ -460,6 +460,7 @@ class Ipv4L3Protocol : public Ipv4
     Ipv4InterfaceReverseContainer
         m_reverseInterfacesContainer; //!< Container of NetDevice / Interface index associations.
     uint8_t m_defaultTtl;             //!< Default TTL
+    Time m_forwardingDelay;           //!< Per-hop unicast forwarding processing delay
     std::map<std::pair<uint64_t, uint8_t>, uint16_t>
         m_identification; //!< Identification (for each {src, dst, proto} tuple)
     Ptr<Node> m_node;     //!< Node attached to stack.

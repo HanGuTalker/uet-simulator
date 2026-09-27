@@ -25,7 +25,8 @@ The verified requirement matrix is in
 [`requirements/ai-base.yaml`](requirements/ai-base.yaml), and experiment
 reports are under [`docs/uet`](docs/uet). Protocol scope, wire-format, delivery
 mode, and validation notes are indexed in
-[`docs/uec/README.md`](docs/uec/README.md).
+[`docs/uec/README.md`](docs/uec/README.md). The shared data-center timing assumptions are defined
+in [`docs/transport/delay-model.md`](docs/transport/delay-model.md).
 
 ## Quick start
 

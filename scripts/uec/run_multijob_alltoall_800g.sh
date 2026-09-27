@@ -9,8 +9,9 @@ binary=${UET_BENCH_BINARY:-build-perf/src/uet/examples/ns3.47-uet-ai-workload-ex
 
 common=(
   --nodes=8 --payloadBytes=1048576 --pattern=all-to-all --fabric=leaf-spine
-  --linkRate=800Gbps --linkDelayNs=1000 --queuePackets=10000 --reusePdc=0
-  --warmupBytes=0 --measurementStartUs=100 --nsccBaseRttNs=6200
+  --linkRate=800Gbps --queuePackets=10000 --reusePdc=0
+  --hostLinkDelayNs=100 --fabricLinkDelayNs=250 --switchProcessingDelayNs=250
+  --warmupBytes=0 --measurementStartUs=100 --nsccBaseRttNs=0
   --nsccTargetQueueDelayNs=800 --enableEcn=1 --ecnMinBytes=98304
   --ecnMaxBytes=163840 --ecnQueueLimitBytes=524288
 )

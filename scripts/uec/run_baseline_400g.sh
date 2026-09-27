@@ -29,7 +29,7 @@ for payload in "${payload_sizes[@]}"; do
       --pattern="$pattern" \
       --fabric=switched \
       --linkRate=400Gbps \
-      --linkDelayNs=1000 \
+      --hostLinkDelayNs=100 --fabricLinkDelayNs=250 --switchProcessingDelayNs=250 \
       --queuePackets=10000 \
       --outputPrefix="$prefix"
     summary="$prefix-$pattern-summary.csv"

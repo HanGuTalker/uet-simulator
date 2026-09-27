@@ -19,12 +19,14 @@ common=(
   --pattern=all-to-all
   --fabric=leaf-spine
   --linkRate=800Gbps
-  --linkDelayNs=1000
+  --hostLinkDelayNs=100
+  --fabricLinkDelayNs=250
+  --switchProcessingDelayNs=250
   --reusePdc=1
   --warmupBytes=1048576
   --measurementStartUs=1500
   --startGapNs=0
-  --nsccBaseRttNs=6200
+  --nsccBaseRttNs=0
   --nsccTargetQueueDelayNs=800
 )
 

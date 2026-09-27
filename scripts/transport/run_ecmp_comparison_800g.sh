@@ -37,7 +37,10 @@ for protocol in $protocols; do
       --payloadBytes="$payload_bytes" \
       --fabric=leaf-spine \
       --linkRate=800Gbps \
-      --linkDelayNs=1000 \
+      --hostLinkDelayNs=100 \
+      --fabricLinkDelayNs=250 \
+      --switchProcessingDelayNs=250 \
+      --nsccBaseRttNs=0 \
       --outputPrefix="$prefix"
 
     summary="$prefix-$pattern-summary.csv"

@@ -15,9 +15,10 @@ fi
 common=(
   --nodes=8 --messages=2 --payloadBytes=4194304 --pattern=ring-allreduce
   --ringInterleaved=1 --backgroundAllToAllGroups=1 --backgroundPayloadBytes=1048576
-  --fabric=leaf-spine --linkRate=800Gbps --linkDelayNs=1000 --queuePackets=10000
+  --fabric=leaf-spine --linkRate=800Gbps --queuePackets=10000
+  --hostLinkDelayNs=100 --fabricLinkDelayNs=250 --switchProcessingDelayNs=250
   --reusePdc=1 --warmupBytes=1048576 --measurementStartUs=1500 --startGapNs=0
-  --nsccBaseRttNs=6200 --nsccTargetQueueDelayNs=800 --nsccInitialWindowBytes=65536
+  --nsccBaseRttNs=0 --nsccTargetQueueDelayNs=800 --nsccInitialWindowBytes=65536
   --autoScaleInitialWindow=1 --enableEcn=1 --ecnMinBytes=98304
   --ecnMaxBytes=163840 --ecnQueueLimitBytes=524288
   --backgroundJobWeight=1 --enableWorkConservingScheduler=1

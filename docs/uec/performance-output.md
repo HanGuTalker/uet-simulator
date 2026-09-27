@@ -27,8 +27,9 @@ and endpoint-triggered path reroutes.
 Transport counters include transmitted/received UDP datagrams plus path-MTU and CRC drops. These
 counters are aggregate totals across every endpoint in the run.
 
-New outputs use schema version 6 and include the canonical `protocol`, physical fabric path counters
-and spine count in JSON and CSV rows.
+New outputs use schema version 7 and include the canonical `protocol`, physical fabric path counters,
+spine count, split link delays, switch-processing delay and topology-derived base RTT in JSON and
+CSV rows.
 Schema version 1 files created before the common transport migration remain valid frozen UEC
 artifacts; they implicitly describe UEC.
 
