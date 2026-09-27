@@ -29,6 +29,7 @@
 #include <sstream>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 using namespace ns3;
@@ -45,6 +46,7 @@ class AiWorkload
              bool ringInterleaved,
              const std::string& fabricType,
              uint32_t spineCount,
+             uint32_t fatTreeK,
              const std::string& linkRate,
              uint64_t linkRateBps,
              uint32_t legacyLinkDelayNs,
@@ -87,6 +89,14 @@ class AiWorkload
         m_ringInterleaved = ringInterleaved;
         m_fabricType = fabricType;
         m_spineCount = (fabricType == "leaf-spine") ? spineCount : 0;
+        m_fatTreeK = fabricType == "fat-tree" ? fatTreeK : 0;
+        if (m_fatTreeK > 0)
+        {
+            m_fatTreePodCount = m_fatTreeK;
+            m_fatTreeEdgeCount = m_fatTreeK * m_fatTreeK / 2;
+            m_fatTreeAggregationCount = m_fatTreeEdgeCount;
+            m_fatTreeCoreCount = m_fatTreeK * m_fatTreeK / 4;
+        }
         m_linkRate = linkRate;
         m_linkRateBps = linkRateBps;
         m_legacyLinkDelayNs = legacyLinkDelayNs;
@@ -94,8 +104,10 @@ class AiWorkload
         m_fabricLinkDelayNs = legacyLinkDelayNs == 0 ? fabricLinkDelayNs : legacyLinkDelayNs;
         m_switchProcessingDelayNs = switchProcessingDelayNs;
         m_topologyBaseRttNs =
-            fabricType == "leaf-spine" ? 4ULL * m_hostLinkDelayNs + 4ULL * m_fabricLinkDelayNs +
-                                             6ULL * m_switchProcessingDelayNs + 200ULL
+            fabricType == "fat-tree" ? 4ULL * m_hostLinkDelayNs + 8ULL * m_fabricLinkDelayNs +
+                                           10ULL * m_switchProcessingDelayNs + 200ULL
+            : fabricType == "leaf-spine" ? 4ULL * m_hostLinkDelayNs + 4ULL * m_fabricLinkDelayNs +
+                                               6ULL * m_switchProcessingDelayNs + 200ULL
             : fabricType == "switched"
                 ? 4ULL * m_hostLinkDelayNs + 2ULL * m_switchProcessingDelayNs + 200ULL
                 : 2ULL * m_hostLinkDelayNs + 200ULL;
@@ -150,7 +162,7 @@ class AiWorkload
         m_ecnMaxBytes = ecnMaxBytes;
         m_ecnQueueLimitBytes = ecnQueueLimitBytes;
 
-        if (fabricType == "leaf-spine")
+        if (fabricType == "leaf-spine" || fabricType == "fat-tree")
         {
             Config::SetDefault("ns3::Ipv4GlobalRouting::FlowEcmpRouting", BooleanValue(true));
             Config::SetDefault("ns3::Ipv4GlobalRouting::RandomEcmpRouting", BooleanValue(false));
@@ -164,7 +176,8 @@ class AiWorkload
         std::vector<Ipv4Address> endpointAddresses;
         std::vector<Ptr<NetDevice>> routerEgressDevices;
         std::vector<uint32_t> routerEgressLabels;
-        std::vector<std::tuple<Ptr<NetDevice>, uint32_t, uint32_t>> leafSpineUplinks;
+        std::vector<std::tuple<Ptr<NetDevice>, std::string, uint32_t, std::string, uint32_t, bool>>
+            fabricUplinks;
         if (fabricType == "switched")
         {
             NodeContainer router;
@@ -237,7 +250,111 @@ class AiWorkload
                     routerEgressLabels.push_back(1000 + leaf * 100 + spine);
                     routerEgressDevices.push_back(devices.Get(1));
                     routerEgressLabels.push_back(2000 + leaf * 100 + spine);
-                    leafSpineUplinks.emplace_back(devices.Get(0), leaf, spine);
+                    fabricUplinks.emplace_back(devices.Get(0), "leaf", leaf, "spine", spine, true);
+                }
+            }
+            Ipv4GlobalRoutingHelper::PopulateRoutingTables();
+        }
+        else if (fabricType == "fat-tree")
+        {
+            const uint32_t k = m_fatTreeK;
+            const uint32_t half = k / 2;
+            NodeContainer edgeSwitches;
+            NodeContainer aggregationSwitches;
+            NodeContainer coreSwitches;
+            edgeSwitches.Create(m_fatTreeEdgeCount);
+            aggregationSwitches.Create(m_fatTreeAggregationCount);
+            coreSwitches.Create(m_fatTreeCoreCount);
+            internet.Install(edgeSwitches);
+            internet.Install(aggregationSwitches);
+            internet.Install(coreSwitches);
+
+            PointToPointHelper link;
+            link.SetDeviceAttribute("DataRate", StringValue(linkRate));
+            link.SetDeviceAttribute("Mtu", UintegerValue(9000));
+            link.SetQueue(
+                "ns3::DropTailQueue",
+                "MaxSize",
+                StringValue(std::to_string((enableEcn || enableTrimming) ? 1 : queuePackets) +
+                            "p"));
+            Ipv4AddressHelper subnet;
+            subnet.SetBase("10.70.0.0", "255.255.255.252");
+
+            const uint32_t hostsPerPod = k * k / 4;
+            const uint32_t hostsPerEdge = half;
+            link.SetChannelAttribute("Delay", TimeValue(NanoSeconds(m_hostLinkDelayNs)));
+            for (uint32_t endpoint = 0; endpoint < nodeCount; ++endpoint)
+            {
+                const uint32_t pod = endpoint / hostsPerPod;
+                const uint32_t edgeWithinPod = (endpoint % hostsPerPod) / hostsPerEdge;
+                const uint32_t edge = pod * half + edgeWithinPod;
+                auto devices =
+                    link.Install(NodeContainer(nodes.Get(endpoint), edgeSwitches.Get(edge)));
+                const auto interfaces = subnet.Assign(devices);
+                subnet.NewNetwork();
+                endpointAddresses.push_back(interfaces.GetAddress(0));
+                routerEgressDevices.push_back(devices.Get(1));
+                routerEgressLabels.push_back(10000 + endpoint);
+            }
+
+            link.SetChannelAttribute("Delay", TimeValue(NanoSeconds(m_fabricLinkDelayNs)));
+            uint32_t edgeAggregationLink = 0;
+            for (uint32_t pod = 0; pod < k; ++pod)
+            {
+                for (uint32_t edgeWithinPod = 0; edgeWithinPod < half; ++edgeWithinPod)
+                {
+                    const uint32_t edge = pod * half + edgeWithinPod;
+                    for (uint32_t aggregationWithinPod = 0; aggregationWithinPod < half;
+                         ++aggregationWithinPod)
+                    {
+                        const uint32_t aggregation = pod * half + aggregationWithinPod;
+                        auto devices =
+                            link.Install(NodeContainer(edgeSwitches.Get(edge),
+                                                       aggregationSwitches.Get(aggregation)));
+                        subnet.Assign(devices);
+                        subnet.NewNetwork();
+                        routerEgressDevices.push_back(devices.Get(0));
+                        routerEgressLabels.push_back(20000 + 2 * edgeAggregationLink);
+                        routerEgressDevices.push_back(devices.Get(1));
+                        routerEgressLabels.push_back(20001 + 2 * edgeAggregationLink);
+                        fabricUplinks.emplace_back(devices.Get(0),
+                                                   "edge",
+                                                   edge,
+                                                   "aggregation",
+                                                   aggregation,
+                                                   true);
+                        ++edgeAggregationLink;
+                    }
+                }
+            }
+
+            uint32_t aggregationCoreLink = 0;
+            for (uint32_t pod = 0; pod < k; ++pod)
+            {
+                for (uint32_t aggregationWithinPod = 0; aggregationWithinPod < half;
+                     ++aggregationWithinPod)
+                {
+                    const uint32_t aggregation = pod * half + aggregationWithinPod;
+                    for (uint32_t coreWithinGroup = 0; coreWithinGroup < half; ++coreWithinGroup)
+                    {
+                        const uint32_t core = aggregationWithinPod * half + coreWithinGroup;
+                        auto devices =
+                            link.Install(NodeContainer(aggregationSwitches.Get(aggregation),
+                                                       coreSwitches.Get(core)));
+                        subnet.Assign(devices);
+                        subnet.NewNetwork();
+                        routerEgressDevices.push_back(devices.Get(0));
+                        routerEgressLabels.push_back(30000 + 2 * aggregationCoreLink);
+                        routerEgressDevices.push_back(devices.Get(1));
+                        routerEgressLabels.push_back(30001 + 2 * aggregationCoreLink);
+                        fabricUplinks.emplace_back(devices.Get(0),
+                                                   "aggregation",
+                                                   aggregation,
+                                                   "core",
+                                                   core,
+                                                   false);
+                        ++aggregationCoreLink;
+                    }
                 }
             }
             Ipv4GlobalRoutingHelper::PopulateRoutingTables();
@@ -260,11 +377,16 @@ class AiWorkload
                 endpointAddresses.push_back(interfaces.GetAddress(i));
             }
         }
-        for (const auto& [device, leaf, spine] : leafSpineUplinks)
+        for (const auto& [device, fromTier, fromId, toTier, toId, wireAccounting] : fabricUplinks)
         {
-            device->TraceConnectWithoutContext(
-                "PhyTxBegin",
-                MakeBoundCallback(&AiWorkload::FabricPathTxSink, this, leaf, spine));
+            device->TraceConnectWithoutContext("PhyTxBegin",
+                                               MakeBoundCallback(&AiWorkload::FabricPathTxSink,
+                                                                 this,
+                                                                 fromTier,
+                                                                 fromId,
+                                                                 toTier,
+                                                                 toId,
+                                                                 wireAccounting));
         }
 
         if (enableEcn || enableTrimming)
@@ -288,8 +410,9 @@ class AiWorkload
                     "LinkBandwidth",
                     StringValue(linkRate),
                     "LinkDelay",
-                    TimeValue(NanoSeconds(fabricType == "leaf-spine" ? m_fabricLinkDelayNs
-                                                                     : m_hostLinkDelayNs)),
+                    TimeValue(NanoSeconds((fabricType == "leaf-spine" || fabricType == "fat-tree")
+                                              ? m_fabricLinkDelayNs
+                                              : m_hostLinkDelayNs)),
                     "MinTh",
                     DoubleValue(ecnMinBytes),
                     "MaxTh",
@@ -774,9 +897,12 @@ class AiWorkload
     struct FabricPathSample
     {
         int64_t timeNs{0};
-        uint32_t leafId{0};
-        uint32_t spineId{0};
+        std::string fromTier;
+        uint32_t fromId{0};
+        std::string toTier;
+        uint32_t toId{0};
         uint32_t wireBytes{0};
+        bool wireAccounting{false};
     };
 
     void SubmitMessage(uint32_t source,
@@ -994,13 +1120,33 @@ class AiWorkload
     }
 
     static void FabricPathTxSink(AiWorkload* workload,
-                                 uint32_t leafId,
-                                 uint32_t spineId,
+                                 std::string fromTier,
+                                 uint32_t fromId,
+                                 std::string toTier,
+                                 uint32_t toId,
+                                 bool wireAccounting,
                                  Ptr<const Packet> packet)
     {
-        workload->m_fabricPathSamples.push_back(
-            {Simulator::Now().GetNanoSeconds(), leafId, spineId, packet->GetSize()});
-        workload->m_activeSpines.insert(spineId);
+        workload->m_fabricPathSamples.push_back({Simulator::Now().GetNanoSeconds(),
+                                                 std::move(fromTier),
+                                                 fromId,
+                                                 std::move(toTier),
+                                                 toId,
+                                                 packet->GetSize(),
+                                                 wireAccounting});
+        const auto& sample = workload->m_fabricPathSamples.back();
+        if (sample.toTier == "spine")
+        {
+            workload->m_activeSpines.insert(sample.toId);
+        }
+        else if (sample.toTier == "aggregation")
+        {
+            workload->m_activeAggregations.insert(sample.toId);
+        }
+        else if (sample.toTier == "core")
+        {
+            workload->m_activeCores.insert(sample.toId);
+        }
     }
 
     void DeviceQueueDrop(Ptr<const Packet>)
@@ -1117,11 +1263,14 @@ class AiWorkload
             return false;
         }
 
-        fabricPaths << "time_ns,leaf_id,spine_id,wire_bytes\n";
+        fabricPaths << "time_ns,leaf_id,spine_id,wire_bytes,from_tier,from_id,to_tier,to_id,"
+                       "wire_accounting\n";
         for (const auto& sample : m_fabricPathSamples)
         {
-            fabricPaths << sample.timeNs << ',' << sample.leafId << ',' << sample.spineId << ','
-                        << sample.wireBytes << '\n';
+            fabricPaths << sample.timeNs << ',' << sample.fromId << ',' << sample.toId << ','
+                        << sample.wireBytes << ',' << sample.fromTier << ',' << sample.fromId << ','
+                        << sample.toTier << ',' << sample.toId << ','
+                        << (sample.wireAccounting ? 1 : 0) << '\n';
         }
 
         paths << "time_ns,source,pdc_id,sequence,path_id\n";
@@ -1186,7 +1335,9 @@ class AiWorkload
         }
 
         const std::string header =
-            "protocol,operation,pattern,fabric,spine_count,link_rate,link_rate_bps,"
+            "protocol,operation,pattern,fabric,spine_count,fat_tree_k,fat_tree_pod_count,"
+            "fat_tree_edge_count,fat_tree_aggregation_count,fat_tree_core_count,link_rate,"
+            "link_rate_bps,"
             "legacy_link_delay_ns,host_link_delay_ns,fabric_link_delay_ns,"
             "switch_processing_delay_ns,topology_base_rtt_ns,queue_packets,"
             "node_"
@@ -1208,11 +1359,14 @@ class AiWorkload
             "max_latency_ns,retransmissions,timeouts,nacks,ecn_marks,trimmed_packets,sack_packets,"
             "fast_retransmissions,rtt_probes,slow_path_signals,path_reroutes,tx_datagrams,"
             "rx_datagrams,mtu_drops,crc_drops,path_selections,active_paths,active_spines,"
+            "active_aggregations,active_cores,"
             "fabric_path_packets,device_queue_drops\n";
         summaries << header << m_transportName << ',' << m_operationName << ',' << m_pattern << ','
-                  << m_fabricType << ',' << m_spineCount << ',' << m_linkRate << ','
-                  << m_linkRateBps << ',' << m_legacyLinkDelayNs << ',' << m_hostLinkDelayNs << ','
-                  << m_fabricLinkDelayNs << ',' << m_switchProcessingDelayNs << ','
+                  << m_fabricType << ',' << m_spineCount << ',' << m_fatTreeK << ','
+                  << m_fatTreePodCount << ',' << m_fatTreeEdgeCount << ','
+                  << m_fatTreeAggregationCount << ',' << m_fatTreeCoreCount << ',' << m_linkRate
+                  << ',' << m_linkRateBps << ',' << m_legacyLinkDelayNs << ',' << m_hostLinkDelayNs
+                  << ',' << m_fabricLinkDelayNs << ',' << m_switchProcessingDelayNs << ','
                   << m_topologyBaseRttNs << ',' << m_queuePackets << ',' << m_nodeCount << ','
                   << m_messagesPerPair << ',' << m_payloadBytes << ',' << (m_reusePdc ? 1 : 0)
                   << ',' << m_warmupBytes << ',' << m_warmupsAttempted << ',' << m_warmupsSubmitted
@@ -1238,15 +1392,20 @@ class AiWorkload
                   << m_pathReroutes << ',' << m_txDatagrams << ',' << m_rxDatagrams << ','
                   << m_mtuDrops << ',' << m_crcDrops << ',' << m_pathSamples.size() << ','
                   << m_pathPacketCounts.size() << ',' << m_activeSpines.size() << ','
+                  << m_activeAggregations.size() << ',' << m_activeCores.size() << ','
                   << m_fabricPathSamples.size() << ',' << m_deviceQueueDrops << '\n';
 
         json << std::fixed << std::setprecision(3) << "{\n"
-             << "  \"schema_version\": 7,\n"
+             << "  \"schema_version\": 8,\n"
              << "  \"protocol\": \"" << m_transportName << "\",\n"
              << "  \"operation\": \"" << m_operationName << "\",\n"
              << "  \"pattern\": \"" << m_pattern << "\",\n"
              << "  \"fabric\": \"" << m_fabricType << "\",\n"
              << "  \"spine_count\": " << m_spineCount << ",\n"
+             << "  \"fat_tree\": {\"k\": " << m_fatTreeK << ", \"pods\": " << m_fatTreePodCount
+             << ", \"edge_switches\": " << m_fatTreeEdgeCount
+             << ", \"aggregation_switches\": " << m_fatTreeAggregationCount
+             << ", \"core_switches\": " << m_fatTreeCoreCount << "},\n"
              << "  \"link_rate\": \"" << m_linkRate << "\",\n"
              << "  \"link_rate_bps\": " << m_linkRateBps << ",\n"
              << "  \"delay_model_ns\": {\"legacy_link\": " << m_legacyLinkDelayNs
@@ -1324,6 +1483,8 @@ class AiWorkload
              << "  \"path_selection\": {\"selections\": " << m_pathSamples.size()
              << ", \"active_paths\": " << m_pathPacketCounts.size()
              << ", \"active_spines\": " << m_activeSpines.size()
+             << ", \"active_aggregations\": " << m_activeAggregations.size()
+             << ", \"active_cores\": " << m_activeCores.size()
              << ", \"fabric_path_packets\": " << m_fabricPathSamples.size() << "},\n"
              << "  \"device_queue_drops\": " << m_deviceQueueDrops << "\n"
              << "}\n";
@@ -1362,6 +1523,11 @@ class AiWorkload
     std::string m_pattern;
     std::string m_fabricType;
     uint32_t m_spineCount{1};
+    uint32_t m_fatTreeK{0};
+    uint32_t m_fatTreePodCount{0};
+    uint32_t m_fatTreeEdgeCount{0};
+    uint32_t m_fatTreeAggregationCount{0};
+    uint32_t m_fatTreeCoreCount{0};
     std::string m_linkRate;
     uint64_t m_linkRateBps{0};
     uint32_t m_legacyLinkDelayNs{0};
@@ -1419,6 +1585,8 @@ class AiWorkload
     std::map<uint32_t, uint64_t> m_pathPacketCounts;
     std::vector<FabricPathSample> m_fabricPathSamples;
     std::set<uint32_t> m_activeSpines;
+    std::set<uint32_t> m_activeAggregations;
+    std::set<uint32_t> m_activeCores;
     int64_t m_throughputBinNs{1000};
     std::map<uint32_t, std::map<int64_t, uint64_t>> m_rxPayloadBins;
     uint32_t m_warmupsAttempted{0};
@@ -1468,6 +1636,7 @@ main(int argc, char* argv[])
     bool ringInterleaved = false;
     std::string fabric = "switched";
     uint32_t spines = 2;
+    uint32_t fatTreeK = 4;
     std::string linkRate = "400Gbps";
     uint32_t linkDelayNs = 0;
     uint32_t hostLinkDelayNs = 100;
@@ -1506,8 +1675,11 @@ main(int argc, char* argv[])
     command.AddValue("ringInterleaved",
                      "Alternate first-half and second-half ranks in the AllReduce ring",
                      ringInterleaved);
-    command.AddValue("fabric", "switched star, two-leaf leaf-spine, or shared csma", fabric);
+    command.AddValue("fabric",
+                     "switched star, two-leaf leaf-spine, three-tier fat-tree, or shared csma",
+                     fabric);
     command.AddValue("spines", "Number of ECMP spines in a leaf-spine fabric", spines);
+    command.AddValue("fatTreeK", "Even k parameter for a k-ary fat-tree", fatTreeK);
     command.AddValue("linkRate", "Endpoint and fabric link data rate", linkRate);
     command.AddValue("linkDelayNs",
                      "Legacy one-way delay override for every link; zero uses split delays",
@@ -1587,8 +1759,11 @@ main(int argc, char* argv[])
         ((ringJobWeight == 0) != (backgroundJobWeight == 0)) ||
         (ringJobWeight > 0 && backgroundAllToAllGroups == 0) ||
         (enableWorkConservingScheduler && ringJobWeight == 0) ||
-        (fabric != "switched" && fabric != "leaf-spine" && fabric != "csma") ||
-        (fabric == "leaf-spine" && (nodes < 4 || nodes % 2 != 0)) || spines == 0 || spines > 16 ||
+        (fabric != "switched" && fabric != "leaf-spine" && fabric != "fat-tree" &&
+         fabric != "csma") ||
+        (fabric == "leaf-spine" && (nodes < 4 || nodes % 2 != 0 || spines == 0 || spines > 16)) ||
+        (fabric == "fat-tree" && (fatTreeK < 4 || fatTreeK > 8 || fatTreeK % 2 != 0 ||
+                                  nodes != fatTreeK * fatTreeK * fatTreeK / 4)) ||
         hostLinkDelayNs == 0 || fabricLinkDelayNs == 0 || queuePackets == 0 ||
         (nsccBaseRttNs != 0 && nsccBaseRttNs < 128) || nsccTargetQueueDelayNs < 128 ||
         nsccInitialWindowBytes == 0 ||
@@ -1612,6 +1787,7 @@ main(int argc, char* argv[])
                         ringInterleaved,
                         fabric,
                         spines,
+                        fatTreeK,
                         linkRate,
                         linkRateBps,
                         linkDelayNs,

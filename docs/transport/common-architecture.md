@@ -108,6 +108,8 @@ ACK fractions over effective-window RTT samples and changes IPv4 UDP source-port
 consecutive congested samples. It is registered for MESSAGE, SEND and WRITE workload experiments;
 see `docs/transport/falcon-model.md` for the intentionally deferred functions.
 
-The shared runner also provides a two-leaf, configurable multi-spine topology with stable
-five-tuple ECMP and per-spine packet traces. See `docs/transport/ecmp-comparison.md` for the common
-800 Gbps comparison entry point and readiness results.
+The shared runner provides both a two-leaf, configurable multi-spine topology and a canonical
+three-tier k-ary fat-tree. IPv4 five-tuple ECMP is salted per forwarding node so independent
+edge-to-aggregation and aggregation-to-core decisions do not become artificially correlated.
+See `docs/transport/ecmp-comparison.md` for the common 800 Gbps comparison entry point and
+`docs/transport/fat-tree-topology.md` for the k=4 construction and readiness results.

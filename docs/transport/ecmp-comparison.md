@@ -8,17 +8,21 @@ the endpoints attach to each leaf and every leaf has one point-to-point link to 
 rate selected by `--linkRate`.
 
 IPv4 global routing uses a stable hash of source address, destination address, IP protocol, UDP
-source port and UDP destination port. Packets in the same five-tuple therefore stay on one spine,
-while a different UDP source-port entropy value can select another spine. This supplies the
+source port and UDP destination port, salted by the forwarding node identifier. Packets in the
+same five-tuple therefore stay on one next hop at a given switch, while independent fat-tree stages
+do not reuse an identical ECMP choice and a different UDP source-port entropy value can select
+another path. This supplies the
 forwarding behavior required to compare these transport strategies:
 
 - UEC and RoCEv2 use flow-pinned forwarding in the current models;
 - veRoCE and MRC vary UDP source-port entropy for packet spraying;
 - Falcon remains flow-pinned until PLB changes its UDP entropy path.
 
-The runner records every packet transmitted on a leaf-to-spine link in `-fabric-paths.csv` as
-`time_ns,leaf_id,spine_id,wire_bytes`. The `active_spines` and `fabric_path_packets` summary fields
-provide an aggregate check. These counters include forward data and reverse control traffic.
+The runner records every packet transmitted on a fabric uplink in `-fabric-paths.csv`. The first
+four columns, `time_ns,leaf_id,spine_id,wire_bytes`, remain backward compatible. Schema 8 appends
+`from_tier,from_id,to_tier,to_id,wire_accounting` so the same trace represents leaf-spine and
+fat-tree links. The active-tier summary fields provide aggregate checks. These counters include
+forward data and reverse control traffic.
 
 ## Reproducible 800 Gbps entry point
 

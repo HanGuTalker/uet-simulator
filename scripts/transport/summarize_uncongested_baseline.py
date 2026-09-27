@@ -13,7 +13,12 @@ PROTOCOL_ORDER = {name: index for index, name in enumerate(("uec", "rocev2", "ve
 
 def fabric_wire_bytes(path: Path) -> int:
     with path.open(newline="", encoding="utf-8") as stream:
-        return sum(int(row["wire_bytes"]) for row in csv.DictReader(stream))
+        rows = csv.DictReader(stream)
+        return sum(
+            int(row["wire_bytes"])
+            for row in rows
+            if "wire_accounting" not in row or row["wire_accounting"] == "1"
+        )
 
 
 def main() -> int:
@@ -50,6 +55,8 @@ def main() -> int:
                 "timeouts": int(summary["timeouts"]),
                 "nacks": int(summary["nacks"]),
                 "active_spines": int(summary["active_spines"]),
+                "active_aggregations": int(summary.get("active_aggregations", 0)),
+                "active_cores": int(summary.get("active_cores", 0)),
                 "fabric_path_packets": int(summary["fabric_path_packets"]),
                 "fabric_wire_bytes": wire_bytes,
                 "fabric_wire_bytes_per_payload_byte": (

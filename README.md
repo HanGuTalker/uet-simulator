@@ -15,8 +15,8 @@ The implementation includes:
 - ACK/NACK, timeout recovery, Go-Back-N, packet trimming, ECN feedback, and
   NSCC congestion control;
 - IPv4/UDP and IPv6/UDP ns-3 integration;
-- single-flow, Incast, All-to-All, Ring AllReduce, mixed-collective, and
-  leaf-spine workloads at 400 and 800 Gbps;
+- single-flow, Incast, All-to-All, Ring AllReduce, mixed-collective, leaf-spine,
+  and three-tier fat-tree workloads at 400 and 800 Gbps;
 - structured CSV/JSON output, queue/cwnd/throughput traces, and reproducible
   experiment scripts.
 
@@ -43,6 +43,7 @@ Run a representative 800 Gbps experiment after the build:
 ```bash
 bash scripts/uec/run_steady_single_800g.sh
 bash scripts/uec/run_leaf_spine_validation_800g.sh
+bash scripts/transport/run_fat_tree_validation_800g.sh
 ```
 
 The large raw result directories and local build products are intentionally

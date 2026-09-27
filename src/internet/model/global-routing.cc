@@ -361,6 +361,14 @@ GlobalRouting<T>::LookupGlobal(IpAddress dest,
                             udp.GetDestinationPort());
                     }
                 }
+                // Salt each forwarding stage independently. Reusing an identical
+                // hash at every switch polarizes multi-tier fabrics because the
+                // same low bit selects both the edge and aggregation next hop.
+                const auto node = m_ip->template GetObject<Node>();
+                if (node)
+                {
+                    mix(node->GetId());
+                }
                 // The route index is taken from the low bits for power-of-two ECMP
                 // groups.  Avalanche the combined value so adjacent addresses and
                 // ports do not collapse onto the same next hop.

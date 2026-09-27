@@ -14,8 +14,9 @@
 - `-throughput.csv`: receiver payload goodput in fixed time bins;
 - `-paths.csv`: every transport path selection with timestamp, source, connection, sequence and
   path identifier;
-- `-fabric-paths.csv`: every packet transmitted on a leaf-to-spine uplink, with timestamp, leaf,
-  selected spine and on-wire size (empty for fabrics without physical spine links).
+- `-fabric-paths.csv`: every packet transmitted on a monitored fabric uplink, with its timestamp,
+  tier-local endpoints, on-wire size and whether that row participates in aggregate wire-byte
+  accounting (empty for fabrics without monitored uplinks).
 
 Times are integer nanoseconds. `goodput_bps` counts successfully delivered application payload bits
 over the interval from first submission to final completion. Latency percentiles use the nearest-rank
@@ -27,9 +28,11 @@ and endpoint-triggered path reroutes.
 Transport counters include transmitted/received UDP datagrams plus path-MTU and CRC drops. These
 counters are aggregate totals across every endpoint in the run.
 
-New outputs use schema version 7 and include the canonical `protocol`, physical fabric path counters,
+New outputs use schema version 8 and include the canonical `protocol`, physical fabric path counters,
 spine count, split link delays, switch-processing delay and topology-derived base RTT in JSON and
-CSV rows.
+CSV rows. Schema 8 adds fat-tree k/pod/edge/aggregation/core inventory and active aggregation/core
+counts. Its fabric trace retains the schema-7 first four columns and appends
+`from_tier,from_id,to_tier,to_id,wire_accounting`.
 Schema version 1 files created before the common transport migration remain valid frozen UEC
 artifacts; they implicitly describe UEC.
 
