@@ -56,12 +56,12 @@ configuration, connection and message requests into the existing RUD data path a
 trace events to the common trace surface. The adapter reports packet spraying and per-path
 congestion control as unsupported because the frozen UEC sender still assigns `pathId=0`.
 
-The workload entry point accepts `--transport=uec`, `--transport=rocev2`, `--transport=veroce` and
-`--transport=mrc`.
+The workload entry point accepts `--transport=uec`, `--transport=rocev2`, `--transport=veroce`,
+`--transport=mrc` and `--transport=falcon`.
 Its `--operation=message|send|write|write-imm|read` switch selects the common verb; RDMA Read is
 currently accepted only by the veRoCE adapter and Write-with-Immediate only by MRC.
-Names for Falcon and MetaRoCE are parsed now. Until the corresponding adapter is registered,
-selecting one fails explicitly and never falls back to another protocol.
+The MetaRoCE name is parsed now, but selecting it fails explicitly because no defensible adapter
+is registered; it never falls back to another protocol.
 
 ## Adapter requirements
 
@@ -80,7 +80,7 @@ The implementation registry is recorded in `requirements/transport-catalog.json`
 
 ## Current verification
 
-The optimized common module and registered UEC, RoCEv2, veRoCE and MRC adapters compile
+The optimized common module and registered UEC, RoCEv2, veRoCE, MRC and Falcon adapters compile
 successfully. The RoCEv2 module is registered as the conventional RC/DCQCN baseline; its exact
 scope and limitations are documented in `docs/transport/rocev2-model.md`.
 
@@ -107,3 +107,7 @@ decrease, retransmission response and sub-packet-window pacing. Its PLB subset c
 ACK fractions over effective-window RTT samples and changes IPv4 UDP source-port entropy after
 consecutive congested samples. It is registered for MESSAGE, SEND and WRITE workload experiments;
 see `docs/transport/falcon-model.md` for the intentionally deferred functions.
+
+The shared runner also provides a two-leaf, configurable multi-spine topology with stable
+five-tuple ECMP and per-spine packet traces. See `docs/transport/ecmp-comparison.md` for the common
+800 Gbps comparison entry point and readiness results.

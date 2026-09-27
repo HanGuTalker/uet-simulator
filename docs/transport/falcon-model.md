@@ -85,12 +85,13 @@ the attempt threshold is reached, the connection changes its IPv4 UDP source-por
 Each endpoint owns a configurable bank of source sockets. The simulation-only tag records the
 selected path so ACK/NACK responses and common traces retain path identity; the Falcon wire image
 is unchanged. A reroute always selects a path different from the current path. Workload runs emit
-all selections in `-paths.csv` and report selection and active-path counts in schema-version-5
+all selections in `-paths.csv` and report selection and active-path counts in schema-version-6
 summary output.
 
-The current switched and single-spine benchmark fabrics do not provide physically distinct ECMP
-routes, so a path change there validates Falcon endpoint behavior and UDP entropy but not fabric
-rerouting benefit. A multi-spine ECMP topology is required before claiming PLB performance gains.
+The workload runner now provides physically distinct, five-tuple-hashed ECMP routes through its
+configurable multi-spine fabric. This makes an entropy change observable in `-fabric-paths.csv` and
+enables controlled PLB experiments. A PLB performance claim still requires a congested multi-seed
+comparison against the pinned-flow baseline rather than the functional smoke check alone.
 
 ## Verification
 

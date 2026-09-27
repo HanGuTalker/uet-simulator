@@ -10,6 +10,7 @@
 #include "ipv4-route.h"
 #include "ipv4-routing-table-entry.h"
 #include "ipv6-route.h"
+#include "udp-header.h"
 
 #include "ns3/boolean.h"
 #include "ns3/log.h"
@@ -19,6 +20,7 @@
 #include "ns3/object.h"
 #include "ns3/packet.h"
 #include "ns3/simulator.h"
+#include "ns3/uinteger.h"
 
 #include <iomanip>
 #include <vector>
@@ -46,6 +48,16 @@ GlobalRouting<T>::GetTypeId()
                     BooleanValue(false),
                     MakeBooleanAccessor(&GlobalRouting<T>::m_randomEcmpRouting),
                     MakeBooleanChecker())
+                .AddAttribute("FlowEcmpRouting",
+                              "Select IPv4 ECMP next hops with a stable five-tuple hash.",
+                              BooleanValue(false),
+                              MakeBooleanAccessor(&GlobalRouting<T>::m_flowEcmpRouting),
+                              MakeBooleanChecker())
+                .AddAttribute("FlowEcmpSeed",
+                              "Salt mixed into the stable flow ECMP hash.",
+                              UintegerValue(0x9e3779b9),
+                              MakeUintegerAccessor(&GlobalRouting<T>::m_flowEcmpSeed),
+                              MakeUintegerChecker<uint32_t>())
                 .AddAttribute(
                     "RespondToInterfaceEvents",
                     "Set to true if you want to dynamically recompute the global routes upon "
@@ -69,6 +81,16 @@ GlobalRouting<T>::GetTypeId()
                     BooleanValue(false),
                     MakeBooleanAccessor(&GlobalRouting<T>::m_randomEcmpRouting),
                     MakeBooleanChecker())
+                .AddAttribute("FlowEcmpRouting",
+                              "Reserved for parity with IPv4.",
+                              BooleanValue(false),
+                              MakeBooleanAccessor(&GlobalRouting<T>::m_flowEcmpRouting),
+                              MakeBooleanChecker())
+                .AddAttribute("FlowEcmpSeed",
+                              "Salt reserved for parity with IPv4 flow ECMP.",
+                              UintegerValue(0x9e3779b9),
+                              MakeUintegerAccessor(&GlobalRouting<T>::m_flowEcmpSeed),
+                              MakeUintegerChecker<uint32_t>())
                 .AddAttribute(
                     "RespondToInterfaceEvents",
                     "Set to true if you want to dynamically recompute the global routes upon "
@@ -83,6 +105,8 @@ GlobalRouting<T>::GetTypeId()
 template <typename T>
 GlobalRouting<T>::GlobalRouting()
     : m_randomEcmpRouting(false),
+      m_flowEcmpRouting(false),
+      m_flowEcmpSeed(0x9e3779b9),
       m_respondToInterfaceEvents(false)
 {
     NS_LOG_FUNCTION(this);
@@ -201,7 +225,10 @@ GlobalRouting<T>::AddASExternalRouteTo(IpAddress network,
 
 template <typename T>
 Ptr<typename GlobalRouting<T>::IpRoute>
-GlobalRouting<T>::LookupGlobal(IpAddress dest, Ptr<NetDevice> oif)
+GlobalRouting<T>::LookupGlobal(IpAddress dest,
+                               Ptr<NetDevice> oif,
+                               Ptr<const Packet> packet,
+                               const IpHeader* header)
 {
     NS_LOG_FUNCTION(this << dest << oif);
     NS_LOG_LOGIC("Looking for route for destination " << dest);
@@ -314,7 +341,46 @@ GlobalRouting<T>::LookupGlobal(IpAddress dest, Ptr<NetDevice> oif)
         // ECMP routing is enabled, or always select the first route
         // consistently if random ECMP routing is disabled
         uint32_t selectIndex;
-        if (m_randomEcmpRouting)
+        if constexpr (IsIpv4)
+        {
+            if (m_flowEcmpRouting && packet && header && allRoutes.size() > 1)
+            {
+                uint32_t hash = m_flowEcmpSeed;
+                const auto mix = [&hash](uint32_t value) {
+                    hash ^= value + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+                };
+                mix(header->GetSource().Get());
+                mix(header->GetDestination().Get());
+                mix(header->GetProtocol());
+                if (header->GetProtocol() == 17)
+                {
+                    UdpHeader udp;
+                    if (packet->PeekHeader(udp) > 0)
+                    {
+                        mix((static_cast<uint32_t>(udp.GetSourcePort()) << 16) |
+                            udp.GetDestinationPort());
+                    }
+                }
+                // The route index is taken from the low bits for power-of-two ECMP
+                // groups.  Avalanche the combined value so adjacent addresses and
+                // ports do not collapse onto the same next hop.
+                hash ^= hash >> 16;
+                hash *= 0x85ebca6b;
+                hash ^= hash >> 13;
+                hash *= 0xc2b2ae35;
+                hash ^= hash >> 16;
+                selectIndex = hash % allRoutes.size();
+            }
+            else if (m_randomEcmpRouting)
+            {
+                selectIndex = m_rand->GetInteger(0, allRoutes.size() - 1);
+            }
+            else
+            {
+                selectIndex = 0;
+            }
+        }
+        else if (m_randomEcmpRouting)
         {
             selectIndex = m_rand->GetInteger(0, allRoutes.size() - 1);
         }
@@ -602,7 +668,7 @@ GlobalRouting<T>::RouteOutput(Ptr<Packet> p,
     // See if this is a unicast packet we have a route for.
     //
     NS_LOG_LOGIC("Unicast destination- looking up");
-    Ptr<IpRoute> rtentry = LookupGlobal(header.GetDestination(), oif);
+    Ptr<IpRoute> rtentry = LookupGlobal(header.GetDestination(), oif, p, &header);
     if (rtentry)
     {
         sockerr = Socket::ERROR_NOTERROR;
@@ -664,7 +730,7 @@ GlobalRouting<T>::RouteInput(Ptr<const Packet> p,
     }
     // Next, try to find a route
     NS_LOG_LOGIC("Unicast destination- looking up global route");
-    Ptr<IpRoute> rtentry = LookupGlobal(header.GetDestination());
+    Ptr<IpRoute> rtentry = LookupGlobal(header.GetDestination(), nullptr, p, &header);
     if (rtentry)
     {
         NS_LOG_LOGIC("Found unicast destination- calling unicast callback");

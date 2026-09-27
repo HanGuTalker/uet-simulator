@@ -1,6 +1,6 @@
 # Performance statistics and structured output
 
-`uet-ai-workload-example` emits eight files for every run. The base name is
+`uet-ai-workload-example` emits nine files for every run. The base name is
 `<outputPrefix>-<pattern>`:
 
 - `-messages.csv`: one row per offered message, including source, target, payload size, scheduled
@@ -13,7 +13,9 @@
 - `-queue.csv`: queue occupancy changes over time;
 - `-throughput.csv`: receiver payload goodput in fixed time bins;
 - `-paths.csv`: every transport path selection with timestamp, source, connection, sequence and
-  path identifier.
+  path identifier;
+- `-fabric-paths.csv`: every packet transmitted on a leaf-to-spine uplink, with timestamp, leaf,
+  selected spine and on-wire size (empty for fabrics without physical spine links).
 
 Times are integer nanoseconds. `goodput_bps` counts successfully delivered application payload bits
 over the interval from first submission to final completion. Latency percentiles use the nearest-rank
@@ -25,7 +27,8 @@ and endpoint-triggered path reroutes.
 Transport counters include transmitted/received UDP datagrams plus path-MTU and CRC drops. These
 counters are aggregate totals across every endpoint in the run.
 
-New outputs use schema version 5 and include the canonical `protocol` field in JSON and CSV rows.
+New outputs use schema version 6 and include the canonical `protocol`, physical fabric path counters
+and spine count in JSON and CSV rows.
 Schema version 1 files created before the common transport migration remain valid frozen UEC
 artifacts; they implicitly describe UEC.
 
@@ -37,7 +40,7 @@ Example:
   --outputPrefix=results/uec-4node"
 ```
 
-This creates the eight files described above with the base name
+This creates the nine files described above with the base name
 `results/uec-4node-incast`.
 
 For the reproducible 400 Gbps no-congestion baseline sweep, run

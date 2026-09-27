@@ -28,6 +28,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace ns3;
@@ -43,6 +44,7 @@ class AiWorkload
              const std::string& pattern,
              bool ringInterleaved,
              const std::string& fabricType,
+             uint32_t spineCount,
              const std::string& linkRate,
              uint64_t linkRateBps,
              uint32_t linkDelayNs,
@@ -81,6 +83,7 @@ class AiWorkload
         m_pattern = pattern;
         m_ringInterleaved = ringInterleaved;
         m_fabricType = fabricType;
+        m_spineCount = (fabricType == "leaf-spine") ? spineCount : 0;
         m_linkRate = linkRate;
         m_linkRateBps = linkRateBps;
         m_linkDelayNs = linkDelayNs;
@@ -133,6 +136,11 @@ class AiWorkload
         m_ecnMaxBytes = ecnMaxBytes;
         m_ecnQueueLimitBytes = ecnQueueLimitBytes;
 
+        if (fabricType == "leaf-spine")
+        {
+            Config::SetDefault("ns3::Ipv4GlobalRouting::FlowEcmpRouting", BooleanValue(true));
+            Config::SetDefault("ns3::Ipv4GlobalRouting::RandomEcmpRouting", BooleanValue(false));
+        }
         NodeContainer nodes;
         nodes.Create(nodeCount);
         InternetStackHelper internet;
@@ -140,6 +148,7 @@ class AiWorkload
         std::vector<Ipv4Address> endpointAddresses;
         std::vector<Ptr<NetDevice>> routerEgressDevices;
         std::vector<uint32_t> routerEgressLabels;
+        std::vector<std::tuple<Ptr<NetDevice>, uint32_t, uint32_t>> leafSpineUplinks;
         if (fabricType == "switched")
         {
             NodeContainer router;
@@ -171,7 +180,7 @@ class AiWorkload
         else if (fabricType == "leaf-spine")
         {
             NodeContainer fabricNodes;
-            fabricNodes.Create(3);
+            fabricNodes.Create(2 + spineCount);
             internet.Install(fabricNodes);
             PointToPointHelper link;
             link.SetDeviceAttribute("DataRate", StringValue(linkRate));
@@ -198,17 +207,21 @@ class AiWorkload
             }
             for (uint32_t leaf = 0; leaf < 2; ++leaf)
             {
-                auto devices =
-                    link.Install(NodeContainer(fabricNodes.Get(leaf), fabricNodes.Get(2)));
-                Ipv4AddressHelper subnet;
-                std::ostringstream base;
-                base << "10.60." << leaf << ".0";
-                subnet.SetBase(base.str().c_str(), "255.255.255.252");
-                subnet.Assign(devices);
-                routerEgressDevices.push_back(devices.Get(0));
-                routerEgressLabels.push_back(1001 + leaf);
-                routerEgressDevices.push_back(devices.Get(1));
-                routerEgressLabels.push_back(2001 + leaf);
+                for (uint32_t spine = 0; spine < spineCount; ++spine)
+                {
+                    auto devices = link.Install(
+                        NodeContainer(fabricNodes.Get(leaf), fabricNodes.Get(2 + spine)));
+                    Ipv4AddressHelper subnet;
+                    std::ostringstream base;
+                    base << "10.60." << (leaf * spineCount + spine) << ".0";
+                    subnet.SetBase(base.str().c_str(), "255.255.255.252");
+                    subnet.Assign(devices);
+                    routerEgressDevices.push_back(devices.Get(0));
+                    routerEgressLabels.push_back(1000 + leaf * 100 + spine);
+                    routerEgressDevices.push_back(devices.Get(1));
+                    routerEgressLabels.push_back(2000 + leaf * 100 + spine);
+                    leafSpineUplinks.emplace_back(devices.Get(0), leaf, spine);
+                }
             }
             Ipv4GlobalRoutingHelper::PopulateRoutingTables();
         }
@@ -229,6 +242,12 @@ class AiWorkload
             {
                 endpointAddresses.push_back(interfaces.GetAddress(i));
             }
+        }
+        for (const auto& [device, leaf, spine] : leafSpineUplinks)
+        {
+            device->TraceConnectWithoutContext(
+                "PhyTxBegin",
+                MakeBoundCallback(&AiWorkload::FabricPathTxSink, this, leaf, spine));
         }
 
         if (enableEcn || enableTrimming)
@@ -735,6 +754,14 @@ class AiWorkload
         uint32_t pathId{0};
     };
 
+    struct FabricPathSample
+    {
+        int64_t timeNs{0};
+        uint32_t leafId{0};
+        uint32_t spineId{0};
+        uint32_t wireBytes{0};
+    };
+
     void SubmitMessage(uint32_t source,
                        uint32_t target,
                        uint32_t pdcId,
@@ -949,6 +976,16 @@ class AiWorkload
         ++workload->m_pathPacketCounts[pathId];
     }
 
+    static void FabricPathTxSink(AiWorkload* workload,
+                                 uint32_t leafId,
+                                 uint32_t spineId,
+                                 Ptr<const Packet> packet)
+    {
+        workload->m_fabricPathSamples.push_back(
+            {Simulator::Now().GetNanoSeconds(), leafId, spineId, packet->GetSize()});
+        workload->m_activeSpines.insert(spineId);
+    }
+
     void DeviceQueueDrop(Ptr<const Packet>)
     {
         ++m_deviceQueueDrops;
@@ -1055,11 +1092,19 @@ class AiWorkload
         std::ofstream throughput(base + "-throughput.csv");
         std::ofstream collectives(base + "-collectives.csv");
         std::ofstream paths(base + "-paths.csv");
+        std::ofstream fabricPaths(base + "-fabric-paths.csv");
         if (!messages || !summaries || !json || !cwnd || !queue || !throughput || !collectives ||
-            !paths)
+            !paths || !fabricPaths)
         {
             std::cerr << "Unable to create structured output with prefix " << base << std::endl;
             return false;
+        }
+
+        fabricPaths << "time_ns,leaf_id,spine_id,wire_bytes\n";
+        for (const auto& sample : m_fabricPathSamples)
+        {
+            fabricPaths << sample.timeNs << ',' << sample.leafId << ',' << sample.spineId << ','
+                        << sample.wireBytes << '\n';
         }
 
         paths << "time_ns,source,pdc_id,sequence,path_id\n";
@@ -1124,7 +1169,8 @@ class AiWorkload
         }
 
         const std::string header =
-            "protocol,operation,pattern,fabric,link_rate,link_rate_bps,link_delay_ns,queue_packets,"
+            "protocol,operation,pattern,fabric,spine_count,link_rate,link_rate_bps,link_delay_ns,"
+            "queue_packets,"
             "node_"
             "count,"
             "messages_per_pair,payload_bytes,reuse_pdc,warmup_bytes,warmups_attempted,"
@@ -1142,22 +1188,23 @@ class AiWorkload
             "goodput_bps,mean_latency_ns,p50_latency_ns,p95_latency_ns,p99_latency_ns,"
             "max_latency_ns,retransmissions,timeouts,nacks,ecn_marks,trimmed_packets,sack_packets,"
             "fast_retransmissions,rtt_probes,slow_path_signals,path_reroutes,tx_datagrams,"
-            "rx_datagrams,mtu_drops,crc_drops,path_selections,active_paths,device_queue_drops\n";
+            "rx_datagrams,mtu_drops,crc_drops,path_selections,active_paths,active_spines,"
+            "fabric_path_packets,device_queue_drops\n";
         summaries << header << m_transportName << ',' << m_operationName << ',' << m_pattern << ','
-                  << m_fabricType << ',' << m_linkRate << ',' << m_linkRateBps << ','
-                  << m_linkDelayNs << ',' << m_queuePackets << ',' << m_nodeCount << ','
-                  << m_messagesPerPair << ',' << m_payloadBytes << ',' << (m_reusePdc ? 1 : 0)
-                  << ',' << m_warmupBytes << ',' << m_warmupsAttempted << ',' << m_warmupsSubmitted
-                  << ',' << m_warmupsCompleted << ',' << m_measurementStartUs << ',' << m_startGapNs
-                  << ',' << m_backgroundStartOffsetNs << ',' << m_nsccBaseRttNs << ','
-                  << m_nsccTargetQueueDelayNs << ',' << m_nsccInitialWindowBytes << ','
-                  << m_nsccRequestedInitialWindowBytes << ',' << (m_autoScaleInitialWindow ? 1 : 0)
-                  << ',' << MeanMeasurementStartCwnd() << ',' << (m_enableEcn ? 1 : 0) << ','
-                  << (m_enableTrimming ? 1 : 0) << ',' << m_ecnMinBytes << ',' << m_ecnMaxBytes
-                  << ',' << m_ecnQueueLimitBytes << ',' << m_peakQueueBytes << ','
-                  << m_queueMarkedPackets << ',' << m_queueMarkedBytes << ','
-                  << m_queueDroppedPackets << ',' << m_queueDroppedBytes << ',' << summary.expected
-                  << ',' << summary.submitted << ',' << summary.completed << ','
+                  << m_fabricType << ',' << m_spineCount << ',' << m_linkRate << ','
+                  << m_linkRateBps << ',' << m_linkDelayNs << ',' << m_queuePackets << ','
+                  << m_nodeCount << ',' << m_messagesPerPair << ',' << m_payloadBytes << ','
+                  << (m_reusePdc ? 1 : 0) << ',' << m_warmupBytes << ',' << m_warmupsAttempted
+                  << ',' << m_warmupsSubmitted << ',' << m_warmupsCompleted << ','
+                  << m_measurementStartUs << ',' << m_startGapNs << ',' << m_backgroundStartOffsetNs
+                  << ',' << m_nsccBaseRttNs << ',' << m_nsccTargetQueueDelayNs << ','
+                  << m_nsccInitialWindowBytes << ',' << m_nsccRequestedInitialWindowBytes << ','
+                  << (m_autoScaleInitialWindow ? 1 : 0) << ',' << MeanMeasurementStartCwnd() << ','
+                  << (m_enableEcn ? 1 : 0) << ',' << (m_enableTrimming ? 1 : 0) << ','
+                  << m_ecnMinBytes << ',' << m_ecnMaxBytes << ',' << m_ecnQueueLimitBytes << ','
+                  << m_peakQueueBytes << ',' << m_queueMarkedPackets << ',' << m_queueMarkedBytes
+                  << ',' << m_queueDroppedPackets << ',' << m_queueDroppedBytes << ','
+                  << summary.expected << ',' << summary.submitted << ',' << summary.completed << ','
                   << std::setprecision(10) << summary.completionRate << ','
                   << summary.completedBytes << ',' << summary.firstSubmitNs << ','
                   << summary.lastCompletionNs << ',' << summary.makespanNs << ','
@@ -1169,14 +1216,16 @@ class AiWorkload
                   << m_fastRetransmissions << ',' << m_rttProbes << ',' << m_slowPathSignals << ','
                   << m_pathReroutes << ',' << m_txDatagrams << ',' << m_rxDatagrams << ','
                   << m_mtuDrops << ',' << m_crcDrops << ',' << m_pathSamples.size() << ','
-                  << m_pathPacketCounts.size() << ',' << m_deviceQueueDrops << '\n';
+                  << m_pathPacketCounts.size() << ',' << m_activeSpines.size() << ','
+                  << m_fabricPathSamples.size() << ',' << m_deviceQueueDrops << '\n';
 
         json << std::fixed << std::setprecision(3) << "{\n"
-             << "  \"schema_version\": 5,\n"
+             << "  \"schema_version\": 6,\n"
              << "  \"protocol\": \"" << m_transportName << "\",\n"
              << "  \"operation\": \"" << m_operationName << "\",\n"
              << "  \"pattern\": \"" << m_pattern << "\",\n"
              << "  \"fabric\": \"" << m_fabricType << "\",\n"
+             << "  \"spine_count\": " << m_spineCount << ",\n"
              << "  \"link_rate\": \"" << m_linkRate << "\",\n"
              << "  \"link_rate_bps\": " << m_linkRateBps << ",\n"
              << "  \"link_delay_ns\": " << m_linkDelayNs << ",\n"
@@ -1247,7 +1296,9 @@ class AiWorkload
              << ", \"rx_datagrams\": " << m_rxDatagrams << ", \"mtu_drops\": " << m_mtuDrops
              << ", \"crc_drops\": " << m_crcDrops << "},\n"
              << "  \"path_selection\": {\"selections\": " << m_pathSamples.size()
-             << ", \"active_paths\": " << m_pathPacketCounts.size() << "},\n"
+             << ", \"active_paths\": " << m_pathPacketCounts.size()
+             << ", \"active_spines\": " << m_activeSpines.size()
+             << ", \"fabric_path_packets\": " << m_fabricPathSamples.size() << "},\n"
              << "  \"device_queue_drops\": " << m_deviceQueueDrops << "\n"
              << "}\n";
         return true;
@@ -1272,7 +1323,7 @@ class AiWorkload
         }
         std::cout << "outputs: " << outputPrefix << '-' << m_pattern
                   << "-{messages.csv,collectives.csv,summary.csv,summary.json,cwnd.csv,queue.csv,"
-                     "throughput.csv,paths.csv}"
+                     "throughput.csv,paths.csv,fabric-paths.csv}"
                   << std::endl;
     }
 
@@ -1284,6 +1335,7 @@ class AiWorkload
     AiTransportOperation m_operation{AiTransportOperation::MESSAGE};
     std::string m_pattern;
     std::string m_fabricType;
+    uint32_t m_spineCount{1};
     std::string m_linkRate;
     uint64_t m_linkRateBps{0};
     uint32_t m_linkDelayNs{0};
@@ -1334,6 +1386,8 @@ class AiWorkload
     std::vector<QueueSample> m_queueSamples;
     std::vector<PathSample> m_pathSamples;
     std::map<uint32_t, uint64_t> m_pathPacketCounts;
+    std::vector<FabricPathSample> m_fabricPathSamples;
+    std::set<uint32_t> m_activeSpines;
     int64_t m_throughputBinNs{1000};
     std::map<uint32_t, std::map<int64_t, uint64_t>> m_rxPayloadBins;
     uint32_t m_warmupsAttempted{0};
@@ -1382,6 +1436,7 @@ main(int argc, char* argv[])
     std::string pattern = "incast";
     bool ringInterleaved = false;
     std::string fabric = "switched";
+    uint32_t spines = 2;
     std::string linkRate = "400Gbps";
     uint32_t linkDelayNs = 1000;
     uint32_t queuePackets = 10000;
@@ -1418,6 +1473,7 @@ main(int argc, char* argv[])
                      "Alternate first-half and second-half ranks in the AllReduce ring",
                      ringInterleaved);
     command.AddValue("fabric", "switched star, two-leaf leaf-spine, or shared csma", fabric);
+    command.AddValue("spines", "Number of ECMP spines in a leaf-spine fabric", spines);
     command.AddValue("linkRate", "Endpoint and fabric link data rate", linkRate);
     command.AddValue("linkDelayNs", "One-way propagation delay per link in ns", linkDelayNs);
     command.AddValue("queuePackets", "DropTail capacity per device in packets", queuePackets);
@@ -1485,9 +1541,9 @@ main(int argc, char* argv[])
         (ringJobWeight > 0 && backgroundAllToAllGroups == 0) ||
         (enableWorkConservingScheduler && ringJobWeight == 0) ||
         (fabric != "switched" && fabric != "leaf-spine" && fabric != "csma") ||
-        (fabric == "leaf-spine" && (nodes < 4 || nodes % 2 != 0)) || linkDelayNs == 0 ||
-        queuePackets == 0 || nsccBaseRttNs < 128 || nsccTargetQueueDelayNs < 128 ||
-        nsccInitialWindowBytes == 0 ||
+        (fabric == "leaf-spine" && (nodes < 4 || nodes % 2 != 0)) || spines == 0 || spines > 16 ||
+        linkDelayNs == 0 || queuePackets == 0 || nsccBaseRttNs < 128 ||
+        nsccTargetQueueDelayNs < 128 || nsccInitialWindowBytes == 0 ||
         ((enableEcn || enableTrimming) &&
          (fabric == "csma" || ecnMinBytes == 0 || ecnMinBytes >= ecnMaxBytes ||
           ecnMaxBytes >= ecnQueueLimitBytes)) ||
@@ -1507,6 +1563,7 @@ main(int argc, char* argv[])
                         pattern,
                         ringInterleaved,
                         fabric,
+                        spines,
                         linkRate,
                         linkRateBps,
                         linkDelayNs,
