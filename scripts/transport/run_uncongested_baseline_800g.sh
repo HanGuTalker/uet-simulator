@@ -8,7 +8,10 @@ output_dir=${1:-results/uncongested-baseline-800g}
 binary=${AI_TRANSPORT_BINARY:-build-perf/src/uet/examples/ns3.47-uet-ai-workload-example-optimized}
 protocols=${PROTOCOLS:-"uec rocev2 veroce mrc falcon"}
 sizes=${PAYLOAD_SIZES:-"1024 4096 65536 1048576 16777216"}
-initial_window_bytes=${INITIAL_WINDOW_BYTES:-65536}
+# The corrected 800 Gbps, 3.1 us path has a 310,000-byte BDP. Use the common
+# topology-derived maximum of 1.5 BDP so every adapter starts from the same
+# link-filling window without relying on protocol-specific clamping.
+initial_window_bytes=${INITIAL_WINDOW_BYTES:-465000}
 
 if [[ ! -x "$binary" ]]; then
   echo "Benchmark binary not found: $binary" >&2
