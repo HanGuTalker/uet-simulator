@@ -56,3 +56,21 @@ The longer transfer amortizes almost all fixed pipeline latency and approaches t
 rate represents 800 Gbps of payload before headers, so it slightly exceeds the sustainable payload
 rate; this creates bounded serialization backlog and explains the higher per-message mean and P99
 latency without indicating congestion loss.
+
+## 128 MiB scaling check
+
+At `TOTAL_BYTES=134217728`, each protocol sends 8,192 consecutive messages:
+
+| Protocol | Completed | Goodput | Physical-rate fraction | Mean latency | P99 latency |
+|---|---:|---:|---:|---:|---:|
+| UEC | 8192/8192 | 779.298 Gbps | 97.41% | 18.126 us | 34.184 us |
+| RoCEv2 | 8192/8192 | 779.300 Gbps | 97.41% | 18.122 us | 34.180 us |
+| veRoCE | 8192/8192 | 779.143 Gbps | 97.39% | 18.263 us | 34.456 us |
+| MRC | 8192/8192 | 779.298 Gbps | 97.41% | 18.126 us | 34.184 us |
+| Falcon | 8192/8192 | 779.298 Gbps | 97.41% | 18.126 us | 34.184 us |
+
+The UEC result improves by only 0.890 Gbps over the 64 MiB run. Four serialized data packets make
+each 16 KiB message occupy approximately 168 ns of service time, so the workload's practical
+payload-rate asymptote is about 780.19 Gbps. The 128 MiB result is already within 0.9 Gbps of this
+limit. Submission remains slightly faster than service, so queueing latency grows with run length;
+all runs nevertheless complete without retransmission, timeout, marking or loss.
