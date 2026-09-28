@@ -68,3 +68,6 @@ This is a topology and routing readiness check, not a protocol performance compa
 experiments should keep topology, traffic matrix, delays, queue configuration and seeds identical
 across UEC, RoCEv2, veRoCE, MRC and Falcon. The first such experiment is documented in
 `docs/transport/fat-tree-uncongested-baseline-800g.md`.
+
+The standard large-scale topology uses k=8 and 128 endpoints. Its construction and readiness
+results are documented in `docs/transport/fat-tree-128-validation-800g.md`.
