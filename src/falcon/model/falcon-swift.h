@@ -43,6 +43,7 @@ class FalconSwift
     explicit FalconSwift(const FalconSwiftConfig& config = {});
 
     void Initialize(double fcwnd, double ncwnd, Time initialRtt);
+    void SetBaseDelayTarget(Time target);
     bool ProcessAck(Time now,
                     Time rtt,
                     Time fabricDelay,
@@ -60,6 +61,7 @@ class FalconSwift
     double GetEffectiveWindow() const;
     Time GetSmoothedRtt() const;
     Time GetSmoothedDelay() const;
+    Time GetBaseDelayTarget() const;
     Time GetInterPacketGap() const;
     Time GetRetransmissionTimeout() const;
     uint32_t GetRetransmitCount() const;
@@ -82,6 +84,7 @@ class FalconSwift
     double m_ncwnd{1.0};
     Time m_smoothedRtt{MicroSeconds(12)};
     Time m_smoothedDelay{MicroSeconds(12)};
+    bool m_hasDelaySample{false};
     Time m_fabricWindowMarker{Seconds(0)};
     Time m_nicWindowMarker{Seconds(0)};
     NicDirection m_nicDirection{NicDirection::INCREASE};

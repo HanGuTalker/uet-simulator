@@ -30,6 +30,9 @@ class FalconSwiftTestCase : public TestCase
         config.retransmitLimit = 3;
         FalconSwift swift(config);
         swift.Initialize(16.0, 16.0, MicroSeconds(20));
+        swift.SetBaseDelayTarget(MicroSeconds(6));
+        NS_TEST_EXPECT_MSG_EQ(swift.GetBaseDelayTarget(), MicroSeconds(6), "dynamic delay target");
+        swift.SetBaseDelayTarget(MicroSeconds(10));
 
         swift.ProcessAck(MicroSeconds(20), MicroSeconds(20), MicroSeconds(5), 16, 0);
         NS_TEST_EXPECT_MSG_EQ_TOL(swift.GetFabricWindow(), 17.0, 0.0001, "AI result");

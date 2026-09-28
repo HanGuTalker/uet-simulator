@@ -552,6 +552,14 @@ FalconTransportAdapter::ReceiveControl(Ptr<Packet> packet,
             const Time remoteResidence =
                 NanoSeconds(tag.GetAckTxTimeNs() - tag.GetPacketRxTimeNs());
             const Time fabricDelay = rtt > remoteResidence ? rtt - remoteResidence : NanoSeconds(0);
+            const Time observedTarget = fabricDelay + m_config.targetQueueDelay;
+            if (observedTarget < found->second.swift.GetBaseDelayTarget())
+            {
+                // A busy path's first sample can already include queueing. Never
+                // let such a sample raise the conservative topology-derived
+                // initial target; only shorter-path observations may lower it.
+                found->second.swift.SetBaseDelayTarget(observedTarget);
+            }
             const uint32_t oldWindow = GetSwiftWindowBytes(found->second);
             const bool reroute = found->second.swift.ProcessAck(Simulator::Now(),
                                                                 rtt,

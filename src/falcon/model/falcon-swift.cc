@@ -23,6 +23,7 @@ FalconSwift::Initialize(double fcwnd, double ncwnd, Time initialRtt)
     m_ncwnd = std::clamp(ncwnd, m_config.minNcwnd, m_config.maxNcwnd);
     m_smoothedRtt = initialRtt;
     m_smoothedDelay = m_config.baseDelayTarget;
+    m_hasDelaySample = false;
     m_fabricWindowMarker = Seconds(0);
     m_nicWindowMarker = Seconds(0);
     m_nicDirection = NicDirection::INCREASE;
@@ -31,6 +32,16 @@ FalconSwift::Initialize(double fcwnd, double ncwnd, Time initialRtt)
     m_plbCongestedPacketsAcknowledged = 0;
     m_plbRerouteAttempts = 0;
     UpdateDerivedValues();
+}
+
+void
+FalconSwift::SetBaseDelayTarget(Time target)
+{
+    m_config.baseDelayTarget = std::max(NanoSeconds(1), target);
+    if (!m_hasDelaySample)
+    {
+        m_smoothedDelay = m_config.baseDelayTarget;
+    }
 }
 
 bool
@@ -118,6 +129,7 @@ FalconSwift::ProcessAck(Time now,
     m_smoothedDelay =
         NanoSeconds(static_cast<int64_t>(delayAlpha * m_smoothedDelay.GetNanoSeconds() +
                                          (1.0 - delayAlpha) * fabricDelay.GetNanoSeconds()));
+    m_hasDelaySample = true;
     const double oldWindow = GetEffectiveWindow();
     const bool reroute = ComputePlb(oldWindow, packetsAcknowledged);
     UpdateFabricWindow(now, packetsAcknowledged);
@@ -231,6 +243,12 @@ Time
 FalconSwift::GetSmoothedDelay() const
 {
     return m_smoothedDelay;
+}
+
+Time
+FalconSwift::GetBaseDelayTarget() const
+{
+    return m_config.baseDelayTarget;
 }
 
 Time

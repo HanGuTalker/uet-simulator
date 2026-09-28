@@ -70,10 +70,12 @@ specified 131.072 ns unit.
 
 The common `initialWindowBytes` value seeds `fcwnd` and `ncwnd`; it is not a permanent admission
 cap. Subsequent transmissions use the live Swift effective window, bounded only by
-`maximumWindowBytes`. Because the adapter's EACK measurement is round-trip fabric delay, its delay
-target is the topology-derived unloaded RTT plus `targetQueueDelay`. Treating the queue-delay
-budget alone as a complete RTT target would classify an unloaded path as congested and suppress
-window growth.
+`maximumWindowBytes`. Because the adapter's EACK measurement is round-trip fabric delay, its
+initial delay target is the topology-derived unloaded RTT plus `targetQueueDelay`. Each connection
+may then lower that target when it observes a shorter unloaded path. A busy path's first sample is
+never allowed to raise the conservative initial target. Treating the queue-delay budget alone as a
+complete RTT target would classify an unloaded path as congested, while using one worst-case RTT
+forever would give same-edge flows an excessive delay budget.
 
 This is a comparison-oriented Swift/RUE subset rather than a Falcon conformance claim. The OCP
 specification deliberately leaves algorithm parameters programmable, so the simulator provides
@@ -106,6 +108,7 @@ Wire headers and reliability behavior retain their byte-level and state-machine 
 suite deterministically covers additive increase, delay-based multiplicative decrease, the RTT
 guard, retransmission collapse, sub-packet-window pacing and PLB's consecutive-congested-RTT
 threshold. An adapter-level two-node test drops the first data frame deliberately and verifies
-timeout retransmission, eventual message completion and a subsequent UDP entropy-path change.
+timeout retransmission and eventual message completion; PLB threshold and reroute behavior remain
+covered deterministically in the Swift unit suite.
 An independent adapter regression sends a multi-packet message on an uncongested path and verifies
 that the externally visible effective window grows beyond its initial seed.

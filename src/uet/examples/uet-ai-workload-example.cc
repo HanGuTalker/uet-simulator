@@ -25,6 +25,7 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <random>
 #include <set>
 #include <sstream>
 #include <string>
@@ -58,6 +59,8 @@ class AiWorkload
              uint32_t warmupBytes,
              uint32_t measurementStartUs,
              uint64_t startGapNs,
+             uint32_t submissionSeed,
+             uint64_t startJitterNs,
              uint32_t nsccBaseRttNs,
              uint32_t nsccTargetQueueDelayNs,
              uint32_t nsccInitialWindowBytes,
@@ -116,6 +119,8 @@ class AiWorkload
         m_warmupBytes = warmupBytes;
         m_measurementStartUs = measurementStartUs;
         m_startGapNs = startGapNs;
+        m_submissionSeed = submissionSeed;
+        m_startJitterNs = startJitterNs;
         m_nsccRequestedBaseRttNs = nsccBaseRttNs;
         m_nsccBaseRttNs =
             nsccBaseRttNs == 0 ? static_cast<uint32_t>(m_topologyBaseRttNs) : nsccBaseRttNs;
@@ -665,8 +670,25 @@ class AiWorkload
         }
         else
         {
-            for (uint32_t source = 0; source < nodeCount; ++source)
+            std::vector<uint32_t> submissionOrder(nodeCount);
+            std::iota(submissionOrder.begin(), submissionOrder.end(), 0);
+            std::mt19937 submissionGenerator(submissionSeed == 0 ? 1 : submissionSeed);
+            if (submissionSeed != 0)
             {
+                std::shuffle(submissionOrder.begin(), submissionOrder.end(), submissionGenerator);
+            }
+            std::vector<uint64_t> startJitter(nodeCount, 0);
+            if (startJitterNs > 0)
+            {
+                std::uniform_int_distribution<uint64_t> jitterDistribution(0, startJitterNs);
+                for (uint32_t source = 0; source < nodeCount; ++source)
+                {
+                    startJitter[source] = jitterDistribution(submissionGenerator);
+                }
+            }
+            for (uint32_t sourcePosition = 0; sourcePosition < nodeCount; ++sourcePosition)
+            {
+                const uint32_t source = submissionOrder[sourcePosition];
                 for (uint32_t target = 0; target < nodeCount; ++target)
                 {
                     const bool selected =
@@ -719,9 +741,11 @@ class AiWorkload
                             return false;
                         }
                         const uint64_t id = messageId++;
-                        const Time scheduled = NanoSeconds(
-                            measurementStartUs * 1000ULL +
-                            startGapNs * static_cast<uint64_t>(occurrence * nodeCount + source));
+                        const Time scheduled =
+                            NanoSeconds(measurementStartUs * 1000ULL +
+                                        startGapNs * static_cast<uint64_t>(occurrence * nodeCount +
+                                                                           sourcePosition) +
+                                        startJitter[source]);
                         m_records.emplace(
                             id,
                             MessageRecord{id,
@@ -1343,7 +1367,8 @@ class AiWorkload
             "node_"
             "count,"
             "messages_per_pair,payload_bytes,reuse_pdc,warmup_bytes,warmups_attempted,"
-            "warmups_submitted,warmups_completed,measurement_start_us,start_gap_ns,background_"
+            "warmups_submitted,warmups_completed,measurement_start_us,start_gap_ns,submission_"
+            "seed,start_jitter_ns,background_"
             "start_offset_ns,"
             "nscc_base_rtt_ns,nscc_requested_base_rtt_ns,nscc_target_queue_delay_ns,"
             "nscc_initial_window_bytes,"
@@ -1371,7 +1396,8 @@ class AiWorkload
                   << m_messagesPerPair << ',' << m_payloadBytes << ',' << (m_reusePdc ? 1 : 0)
                   << ',' << m_warmupBytes << ',' << m_warmupsAttempted << ',' << m_warmupsSubmitted
                   << ',' << m_warmupsCompleted << ',' << m_measurementStartUs << ',' << m_startGapNs
-                  << ',' << m_backgroundStartOffsetNs << ',' << m_nsccBaseRttNs << ','
+                  << ',' << m_submissionSeed << ',' << m_startJitterNs << ','
+                  << m_backgroundStartOffsetNs << ',' << m_nsccBaseRttNs << ','
                   << m_nsccRequestedBaseRttNs << ',' << m_nsccTargetQueueDelayNs << ','
                   << m_nsccInitialWindowBytes << ',' << m_nsccRequestedInitialWindowBytes << ','
                   << (m_autoScaleInitialWindow ? 1 : 0) << ',' << MeanMeasurementStartCwnd() << ','
@@ -1396,7 +1422,7 @@ class AiWorkload
                   << m_fabricPathSamples.size() << ',' << m_deviceQueueDrops << '\n';
 
         json << std::fixed << std::setprecision(3) << "{\n"
-             << "  \"schema_version\": 8,\n"
+             << "  \"schema_version\": 9,\n"
              << "  \"protocol\": \"" << m_transportName << "\",\n"
              << "  \"operation\": \"" << m_operationName << "\",\n"
              << "  \"pattern\": \"" << m_pattern << "\",\n"
@@ -1440,6 +1466,8 @@ class AiWorkload
              << ", \"warmups_completed\": " << m_warmupsCompleted
              << ", \"measurement_start_us\": " << m_measurementStartUs
              << ", \"start_gap_ns\": " << m_startGapNs
+             << ", \"submission_seed\": " << m_submissionSeed
+             << ", \"start_jitter_ns\": " << m_startJitterNs
              << ", \"measurement_start_cwnd_bytes\": " << MeanMeasurementStartCwnd() << "},\n"
              << "  \"nscc\": {\"base_rtt_ns\": " << m_nsccBaseRttNs
              << ", \"requested_base_rtt_ns\": " << m_nsccRequestedBaseRttNs
@@ -1540,6 +1568,8 @@ class AiWorkload
     uint32_t m_warmupBytes{0};
     uint32_t m_measurementStartUs{0};
     uint64_t m_startGapNs{10000};
+    uint32_t m_submissionSeed{0};
+    uint64_t m_startJitterNs{0};
     uint32_t m_nsccBaseRttNs{0};
     uint32_t m_nsccRequestedBaseRttNs{0};
     uint32_t m_nsccTargetQueueDelayNs{12000};
@@ -1647,6 +1677,8 @@ main(int argc, char* argv[])
     uint32_t warmupBytes = 0;
     uint32_t measurementStartUs = 0;
     uint64_t startGapNs = 10000;
+    uint32_t submissionSeed = 0;
+    uint64_t startJitterNs = 0;
     uint32_t nsccBaseRttNs = 0;
     uint32_t nsccTargetQueueDelayNs = 12000;
     uint32_t nsccInitialWindowBytes = 65536;
@@ -1698,6 +1730,12 @@ main(int argc, char* argv[])
     command.AddValue("warmupBytes", "Unmeasured warm-up message bytes per reused PDC", warmupBytes);
     command.AddValue("measurementStartUs", "Measured traffic start time in us", measurementStartUs);
     command.AddValue("startGapNs", "Gap between measured message submissions in ns", startGapNs);
+    command.AddValue("submissionSeed",
+                     "Nonzero seed that shuffles measured source submission order",
+                     submissionSeed);
+    command.AddValue("startJitterNs",
+                     "Maximum seeded uniform source start-time jitter in ns",
+                     startJitterNs);
     command.AddValue("nsccBaseRttNs",
                      "NSCC base RTT estimate in ns; zero derives it from the topology",
                      nsccBaseRttNs);
@@ -1799,6 +1837,8 @@ main(int argc, char* argv[])
                         warmupBytes,
                         measurementStartUs,
                         startGapNs,
+                        submissionSeed,
+                        startJitterNs,
                         nsccBaseRttNs,
                         nsccTargetQueueDelayNs,
                         nsccInitialWindowBytes,

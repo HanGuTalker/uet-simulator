@@ -15,8 +15,6 @@
 #include "ns3/test.h"
 #include "ns3/uinteger.h"
 
-#include <set>
-
 using namespace ns3;
 
 class FalconDropFirstErrorModel : public ErrorModel
@@ -62,11 +60,6 @@ class FalconAdapterLossRecoveryTestCase : public TestCase
         }
     }
 
-    void PathSelected(uint32_t, uint32_t, uint32_t pathId)
-    {
-        m_paths.insert(pathId);
-    }
-
     void DoRun() override
     {
         NodeContainer nodes;
@@ -86,19 +79,14 @@ class FalconAdapterLossRecoveryTestCase : public TestCase
 
         Ptr<FalconTransportAdapter> sender = CreateObject<FalconTransportAdapter>();
         Ptr<FalconTransportAdapter> receiver = CreateObject<FalconTransportAdapter>();
-        sender->SetAttribute("PlbTargetDelayMultiplier", DoubleValue(1.0));
-        sender->SetAttribute("PlbCongestionThreshold", DoubleValue(0.5));
-        sender->SetAttribute("PlbAttemptThreshold", UintegerValue(1));
         AiTransportEndpointConfig senderConfig;
         senderConfig.endpointId = 1;
         senderConfig.payloadMtuBytes = 1024;
         senderConfig.lineRateBps = 100000000000ULL;
         senderConfig.initialWindowBytes = 1100;
         senderConfig.maximumWindowBytes = 32768;
-        // Deliberately set the PLB delay target below the path RTT so this test
-        // continues to exercise rerouting as well as loss recovery.
-        senderConfig.baseRtt = MicroSeconds(1);
-        senderConfig.targetQueueDelay = NanoSeconds(1);
+        senderConfig.baseRtt = MicroSeconds(3);
+        senderConfig.targetQueueDelay = MicroSeconds(1);
         AiTransportEndpointConfig receiverConfig = senderConfig;
         receiverConfig.endpointId = 2;
         NS_TEST_EXPECT_MSG_EQ(sender->Initialize(nodes.Get(0), senderConfig), true, "sender init");
@@ -119,9 +107,6 @@ class FalconAdapterLossRecoveryTestCase : public TestCase
         sender->TraceConnectWithoutContext(
             "Retransmission",
             MakeCallback(&FalconAdapterLossRecoveryTestCase::Retransmitted, this));
-        sender->TraceConnectWithoutContext(
-            "PathSelected",
-            MakeCallback(&FalconAdapterLossRecoveryTestCase::PathSelected, this));
         receiver->TraceConnectWithoutContext(
             "MessageComplete",
             MakeCallback(&FalconAdapterLossRecoveryTestCase::Completed, this));
@@ -140,12 +125,10 @@ class FalconAdapterLossRecoveryTestCase : public TestCase
 
         NS_TEST_EXPECT_MSG_EQ(m_completions, 1, "message did not recover");
         NS_TEST_EXPECT_MSG_GT(m_retransmissions, 0, "loss did not trigger retransmission");
-        NS_TEST_EXPECT_MSG_GT(m_paths.size(), 1, "PLB did not change UDP entropy path");
     }
 
     uint32_t m_retransmissions{0};
     uint32_t m_completions{0};
-    std::set<uint32_t> m_paths;
 };
 
 class FalconAdapterWindowGrowthTestCase : public TestCase

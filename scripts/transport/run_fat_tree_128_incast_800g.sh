@@ -12,6 +12,8 @@ payload_bytes=${PAYLOAD_BYTES:-65536}
 # Holds one 4096-byte payload plus the largest modeled protocol headers without
 # making the synchronized first-RTT burst exceed the configured 512 KiB queue.
 initial_window_bytes=${INITIAL_WINDOW_BYTES:-4608}
+submission_seed=${SUBMISSION_SEED:-0}
+start_jitter_ns=${START_JITTER_NS:-0}
 
 if [[ ! -x "$binary" ]]; then
   echo "Benchmark binary not found: $binary" >&2
@@ -42,6 +44,8 @@ run_one() {
     --fabricLinkDelayNs=250 \
     --switchProcessingDelayNs=250 \
     --startGapNs=0 \
+    --submissionSeed="$submission_seed" \
+    --startJitterNs="$start_jitter_ns" \
     --nsccBaseRttNs=0 \
     --nsccTargetQueueDelayNs=800 \
     --nsccInitialWindowBytes="$initial_window_bytes" \
