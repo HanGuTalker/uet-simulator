@@ -66,4 +66,5 @@ message for every ordered endpoint pair. The verified k=4 result is:
 
 This is a topology and routing readiness check, not a protocol performance comparison. Subsequent
 experiments should keep topology, traffic matrix, delays, queue configuration and seeds identical
-across UEC, RoCEv2, veRoCE, MRC and Falcon.
+across UEC, RoCEv2, veRoCE, MRC and Falcon. The first such experiment is documented in
+`docs/transport/fat-tree-uncongested-baseline-800g.md`.
