@@ -18,14 +18,18 @@ def require(condition: bool, message: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("output_dir", type=Path)
+    parser.add_argument("--protocols", nargs="+", default=sorted(PROTOCOLS))
+    parser.add_argument("--sizes", nargs="+", type=int, default=sorted(PAYLOAD_BYTES))
     args = parser.parse_args()
+    protocols = set(args.protocols)
+    payload_bytes = set(args.sizes)
 
     with (args.output_dir / "raw-summary.csv").open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
 
-    require(len(rows) == len(PROTOCOLS) * len(PAYLOAD_BYTES), "matrix is not 5 x 4")
+    require(len(rows) == len(protocols) * len(payload_bytes), "matrix dimensions are incorrect")
     observed = {(row["protocol"], int(row["payload_bytes"])) for row in rows}
-    expected = {(protocol, size) for protocol in PROTOCOLS for size in PAYLOAD_BYTES}
+    expected = {(protocol, size) for protocol in protocols for size in payload_bytes}
     require(observed == expected, "protocol/payload matrix contains missing or duplicate entries")
 
     for row in rows:
@@ -46,7 +50,7 @@ def main() -> None:
         require(int(row["queue_dropped_packets"]) == 0, f"{label} had a queue-disc drop")
         require(int(row["device_queue_drops"]) == 0, f"{label} had a device-queue drop")
 
-    print("PASS fat-tree no-congestion baseline: 20/20 configurations validated")
+    print(f"PASS fat-tree no-congestion baseline: {len(rows)}/{len(expected)} configurations validated")
 
 
 if __name__ == "__main__":

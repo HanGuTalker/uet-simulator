@@ -16,6 +16,13 @@ is not statistical inference. Reproduce and validate all 20 configurations with:
 bash scripts/transport/run_fat_tree_uncongested_baseline_800g.sh
 ```
 
+Each ns-3 run is single-threaded, but independent matrix points can run concurrently. On a server,
+set a bounded worker count to use multiple cores while leaving capacity for other users:
+
+```bash
+JOBS=10 bash scripts/transport/run_fat_tree_uncongested_baseline_800g.sh
+```
+
 ## Results
 
 Every configuration completed its message without retransmission, timeout, NACK, ECN mark or queue
