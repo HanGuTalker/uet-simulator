@@ -68,6 +68,13 @@ specified; a resource-exhaustion NACK collapses `ncwnd`. Full-resolution ns-3 ti
 only in `FalconSimulationTag`, while the real BACK/EACK timestamp fields remain serialized in the
 specified 131.072 ns unit.
 
+The common `initialWindowBytes` value seeds `fcwnd` and `ncwnd`; it is not a permanent admission
+cap. Subsequent transmissions use the live Swift effective window, bounded only by
+`maximumWindowBytes`. Because the adapter's EACK measurement is round-trip fabric delay, its delay
+target is the topology-derived unloaded RTT plus `targetQueueDelay`. Treating the queue-delay
+budget alone as a complete RTT target would classify an unloaded path as congested and suppress
+window growth.
+
 This is a comparison-oriented Swift/RUE subset rather than a Falcon conformance claim. The OCP
 specification deliberately leaves algorithm parameters programmable, so the simulator provides
 explicit defaults through `FalconSwiftConfig`. Hardware RUE request/response queues, CSIG parsing,
@@ -100,3 +107,5 @@ suite deterministically covers additive increase, delay-based multiplicative dec
 guard, retransmission collapse, sub-packet-window pacing and PLB's consecutive-congested-RTT
 threshold. An adapter-level two-node test drops the first data frame deliberately and verifies
 timeout retransmission, eventual message completion and a subsequent UDP entropy-path change.
+An independent adapter regression sends a multi-packet message on an uncongested path and verifies
+that the externally visible effective window grows beyond its initial seed.

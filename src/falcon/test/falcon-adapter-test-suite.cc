@@ -95,8 +95,10 @@ class FalconAdapterLossRecoveryTestCase : public TestCase
         senderConfig.lineRateBps = 100000000000ULL;
         senderConfig.initialWindowBytes = 1100;
         senderConfig.maximumWindowBytes = 32768;
-        senderConfig.baseRtt = MicroSeconds(4);
-        senderConfig.targetQueueDelay = MicroSeconds(1);
+        // Deliberately set the PLB delay target below the path RTT so this test
+        // continues to exercise rerouting as well as loss recovery.
+        senderConfig.baseRtt = MicroSeconds(1);
+        senderConfig.targetQueueDelay = NanoSeconds(1);
         AiTransportEndpointConfig receiverConfig = senderConfig;
         receiverConfig.endpointId = 2;
         NS_TEST_EXPECT_MSG_EQ(sender->Initialize(nodes.Get(0), senderConfig), true, "sender init");
@@ -146,6 +148,88 @@ class FalconAdapterLossRecoveryTestCase : public TestCase
     std::set<uint32_t> m_paths;
 };
 
+class FalconAdapterWindowGrowthTestCase : public TestCase
+{
+  public:
+    FalconAdapterWindowGrowthTestCase()
+        : TestCase("Falcon adapter exposes Swift window growth beyond its initial seed")
+    {
+    }
+
+  private:
+    void Completed(uint32_t, uint64_t messageId, uint32_t bytes, Time)
+    {
+        if (messageId == 43 && bytes == 8192)
+        {
+            ++m_completions;
+        }
+    }
+
+    void DoRun() override
+    {
+        NodeContainer nodes;
+        nodes.Create(2);
+        PointToPointHelper pointToPoint;
+        pointToPoint.SetDeviceAttribute("DataRate", StringValue("100Gbps"));
+        pointToPoint.SetChannelAttribute("Delay", TimeValue(MicroSeconds(1)));
+        NetDeviceContainer devices = pointToPoint.Install(nodes);
+        InternetStackHelper internet;
+        internet.Install(nodes);
+        Ipv4AddressHelper addresses;
+        addresses.SetBase("10.251.0.0", "255.255.255.0");
+        Ipv4InterfaceContainer interfaces = addresses.Assign(devices);
+
+        Ptr<FalconTransportAdapter> sender = CreateObject<FalconTransportAdapter>();
+        Ptr<FalconTransportAdapter> receiver = CreateObject<FalconTransportAdapter>();
+        AiTransportEndpointConfig senderConfig;
+        senderConfig.endpointId = 1;
+        senderConfig.payloadMtuBytes = 1024;
+        senderConfig.lineRateBps = 100000000000ULL;
+        senderConfig.initialWindowBytes = 1100;
+        senderConfig.maximumWindowBytes = 32768;
+        senderConfig.baseRtt = MicroSeconds(3);
+        senderConfig.targetQueueDelay = MicroSeconds(1);
+        AiTransportEndpointConfig receiverConfig = senderConfig;
+        receiverConfig.endpointId = 2;
+        NS_TEST_EXPECT_MSG_EQ(sender->Initialize(nodes.Get(0), senderConfig), true, "sender init");
+        NS_TEST_EXPECT_MSG_EQ(receiver->Initialize(nodes.Get(1), receiverConfig),
+                              true,
+                              "receiver init");
+        NS_TEST_EXPECT_MSG_EQ(sender->AddPeer(2, interfaces.GetAddress(1)), true, "sender peer");
+        NS_TEST_EXPECT_MSG_EQ(receiver->AddPeer(1, interfaces.GetAddress(0)),
+                              true,
+                              "receiver peer");
+
+        AiTransportConnectionConfig connectionConfig;
+        connectionConfig.remoteEndpointId = 2;
+        connectionConfig.reliability = AiTransportReliability::RELIABLE_UNORDERED;
+        connectionConfig.retransmissionTimeout = MicroSeconds(20);
+        const uint32_t connectionId = sender->OpenConnection(connectionConfig);
+        receiver->TraceConnectWithoutContext(
+            "MessageComplete",
+            MakeCallback(&FalconAdapterWindowGrowthTestCase::Completed, this));
+
+        AiTransportRequest request;
+        request.remoteEndpointId = 2;
+        request.connectionId = connectionId;
+        request.messageId = 43;
+        request.operation = AiTransportOperation::MESSAGE;
+        request.reliability = AiTransportReliability::RELIABLE_UNORDERED;
+        request.payload = Create<Packet>(8192);
+        NS_TEST_EXPECT_MSG_EQ(sender->Submit(request), true, "submit");
+        Simulator::Stop(MilliSeconds(1));
+        Simulator::Run();
+        Simulator::Destroy();
+
+        NS_TEST_EXPECT_MSG_EQ(m_completions, 1, "message did not complete");
+        NS_TEST_EXPECT_MSG_GT(sender->GetCongestionWindow(connectionId),
+                              senderConfig.initialWindowBytes,
+                              "Swift window remained capped at its initial value");
+    }
+
+    uint32_t m_completions{0};
+};
+
 class FalconAdapterTestSuite : public TestSuite
 {
   public:
@@ -153,6 +237,7 @@ class FalconAdapterTestSuite : public TestSuite
         : TestSuite("falcon-adapter", Type::SYSTEM)
     {
         AddTestCase(new FalconAdapterLossRecoveryTestCase, Duration::QUICK);
+        AddTestCase(new FalconAdapterWindowGrowthTestCase, Duration::QUICK);
     }
 };
 

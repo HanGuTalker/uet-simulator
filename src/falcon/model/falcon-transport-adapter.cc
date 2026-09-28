@@ -138,12 +138,16 @@ FalconTransportAdapter::OpenConnection(const AiTransportConnectionConfig& config
     }
     ConnectionState state;
     state.remoteEndpointId = config.remoteEndpointId;
-    state.congestionWindow =
+    const uint32_t initialWindowBytes =
         config.initialWindowBytes == 0 ? m_config.initialWindowBytes : config.initialWindowBytes;
     state.rateBps = config.lineRateBps == 0 ? m_config.lineRateBps : config.lineRateBps;
     state.retransmissionTimeout = config.retransmissionTimeout;
     FalconSwiftConfig swiftConfig;
-    swiftConfig.baseDelayTarget = m_config.targetQueueDelay;
+    // Swift compares EACK-derived round-trip fabric delay against this target.
+    // The common targetQueueDelay is only the allowed queue component, so add
+    // the topology-derived unloaded RTT instead of treating queue delay as the
+    // complete path target.
+    swiftConfig.baseDelayTarget = m_config.baseRtt + m_config.targetQueueDelay;
     swiftConfig.maxFcwnd =
         std::max(1.0,
                  static_cast<double>(m_config.maximumWindowBytes) /
@@ -157,7 +161,7 @@ FalconTransportAdapter::OpenConnection(const AiTransportConnectionConfig& config
     state.swift = FalconSwift(swiftConfig);
     const double initialPackets =
         std::max(1.0,
-                 static_cast<double>(state.congestionWindow) /
+                 static_cast<double>(initialWindowBytes) /
                      (m_config.payloadMtuBytes + FalconBaseHeader::SERIALIZED_SIZE +
                       FalconPushDataHeader::SERIALIZED_SIZE));
     state.swift.Initialize(initialPackets, initialPackets, m_config.baseRtt);
@@ -226,7 +230,10 @@ FalconTransportAdapter::SetCongestionWindow(uint32_t connectionId, uint32_t byte
         return false;
     }
     const uint32_t old = GetSwiftWindowBytes(found->second);
-    found->second.congestionWindow = bytes;
+    const double packetBytes = m_config.payloadMtuBytes + FalconBaseHeader::SERIALIZED_SIZE +
+                               FalconPushDataHeader::SERIALIZED_SIZE;
+    const double packets = std::max(1.0, static_cast<double>(bytes) / packetBytes);
+    found->second.swift.Initialize(packets, packets, m_config.baseRtt);
     const uint32_t current = GetSwiftWindowBytes(found->second);
     if (old != current)
     {
@@ -275,6 +282,7 @@ FalconTransportAdapter::TryTransmit(uint32_t connectionId)
         return;
     }
     auto& state = found->second;
+    const uint32_t swiftWindowBytes = GetSwiftWindowBytes(state);
     const uint32_t swiftPackets =
         std::max(1u, static_cast<uint32_t>(state.swift.GetEffectiveWindow()));
     while (!state.transmitQueue.empty())
@@ -286,7 +294,7 @@ FalconTransportAdapter::TryTransmit(uint32_t connectionId)
             state.transmitQueue.pop_front();
             continue;
         }
-        if (state.inflightBytes + pending->second.wireBytes > state.congestionWindow ||
+        if (state.inflightBytes + pending->second.wireBytes > swiftWindowBytes ||
             state.inflightPackets >= swiftPackets)
         {
             break;
@@ -659,7 +667,7 @@ FalconTransportAdapter::GetSwiftWindowBytes(const ConnectionState& state) const
     const uint64_t bytes = static_cast<uint64_t>(packets) *
                            (m_config.payloadMtuBytes + FalconBaseHeader::SERIALIZED_SIZE +
                             FalconPushDataHeader::SERIALIZED_SIZE);
-    return static_cast<uint32_t>(std::min<uint64_t>(state.congestionWindow, bytes));
+    return static_cast<uint32_t>(std::min<uint64_t>(m_config.maximumWindowBytes, bytes));
 }
 
 void

@@ -74,7 +74,6 @@ class FalconTransportAdapter : public AiTransportEndpoint
         }
 
         uint32_t remoteEndpointId{0};
-        uint32_t congestionWindow{65536};
         uint32_t inflightBytes{0};
         uint32_t inflightPackets{0};
         uint64_t rateBps{0};

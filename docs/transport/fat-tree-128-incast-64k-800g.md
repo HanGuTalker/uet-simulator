@@ -28,7 +28,7 @@ JOBS=5 bash scripts/transport/run_fat_tree_128_incast_800g.sh
 ## Results
 
 All 635 messages completed without queue drop, device drop, retransmission, timeout or NACK. The
-complete matrix took 6.76 seconds of wall-clock time with five server workers.
+complete matrix took 6.85 seconds of wall-clock time with five server workers.
 
 | Protocol | Aggregate goodput | Mean FCT | P95 FCT | P99 FCT | Maximum FCT | Peak queue | Queue marks / received feedback | Aggregation / core coverage |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -36,7 +36,7 @@ complete matrix took 6.76 seconds of wall-clock time with five server workers.
 | RoCEv2 | 753.663 Gbps | 81.538 us | 88.102 us | 88.307 us | 88.348 us | 339,480 B | 70 / 70 | 30 / 16 |
 | veRoCE | 730.246 Gbps | 84.532 us | 90.898 us | 91.108 us | 91.181 us | 307,852 B | 99 / 82 | 32 / 16 |
 | MRC | 709.418 Gbps | 80.400 us | 91.632 us | 93.732 us | 93.858 us | 416,400 B | 574 / 574 | 32 / 16 |
-| Falcon | 233.164 Gbps | 258.872 us | 284.265 us | 285.286 us | 285.570 us | 348,768 B | 71 / 0 | 32 / 16 |
+| Falcon | 554.765 Gbps | 85.435 us | 111.529 us | 112.579 us | 120.023 us | 348,768 B | 653 / 0 | 31 / 16 |
 
 ## Interpretation and limits
 
@@ -47,12 +47,17 @@ hard limit. veRoCE spreads across every aggregation and core switch and sits bet
 UEC/MRC in aggregate performance.
 
 Falcon is intentionally not driven by IP ECN in the current comparison subset. Its Swift/RUE model
-uses EACK-derived RTT and fabric-delay measurements, so the switch marked 71 packets while the
-common `EcnReceived` counter remained zero. Its conservative sub-packet pacing produces much lower
-goodput in this 64 KiB synchronized burst. This is a result for the documented Falcon subset and
-parameter defaults, not a claim about production Falcon hardware.
+uses EACK-derived RTT and fabric-delay measurements, so the switch marked 653 packets while the
+common `EcnReceived` counter remained zero. Falcon now uses its live Swift window rather than
+mistakenly retaining the 4,608-byte initial seed as a permanent cap, and compares its round-trip
+measurement with unloaded RTT plus the 800 ns queue-delay budget. Relative to the superseded run,
+goodput rises from 233.164 to 554.765 Gbps and mean FCT falls from 258.872 to 85.435 us. The
+remaining aggregate-goodput gap comes primarily from Swift's delay-based response and linear
+window growth on this very short, synchronized 16-packet-per-sender workload. This is a result for
+the documented Falcon subset and parameter defaults, not a claim about production Falcon
+hardware.
 
-Only UEC and MRC currently emit the normalized congestion-window trace in this runner. Queue,
-completion, path and protocol-event metrics remain available for every adapter. The next experiment
-should sweep larger per-sender payloads and at least two initial-window/queue configurations before
-drawing a general congestion-control ranking.
+Falcon now also emits its normalized live congestion-window trace. Queue, completion, path and
+protocol-event metrics remain available for every adapter. The next experiment should sweep larger
+per-sender payloads and at least two initial-window/queue configurations before drawing a general
+congestion-control ranking.
